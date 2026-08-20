@@ -1,0 +1,13 @@
+# mindvirus-defense kit — 층 ② 주기 (systemd user timer)  [예시]
+[Unit]
+Description=Run canon integrity sentinel every 5 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+# ★Persistent=true — 기계가 자거나 꺼져 있어 놓친 발화를 기상 후 따라잡는다.
+#   launchd 의 StartInterval 에는 이 성질이 없다(그쪽은 놓친 회차를 그냥 버린다).
+Persistent=true
+
+[Install]
+WantedBy=timers.target

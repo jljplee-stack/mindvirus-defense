@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  mindvirus-defense kit — 층 ② 상주 스케줄 (macOS launchd)  [예시]
+
+  ★설치 전에 __KIT_ROOT__ 와 __HOME__ 을 실제 경로로 치환하라:
+      sed -e "s|__KIT_ROOT__|$HOME/mindvirus-defense|g" -e "s|__HOME__|$HOME|g" \
+          com.example.canon-sentinel.plist > ~/Library/LaunchAgents/com.example.canon-sentinel.plist
+      mkdir -p ~/.canon/log
+      launchctl unload ~/Library/LaunchAgents/com.example.canon-sentinel.plist 2>/dev/null
+      launchctl load   ~/Library/LaunchAgents/com.example.canon-sentinel.plist
+  검증:
+      launchctl list | grep canon-sentinel     # 항목 1줄
+      sleep 5; tail -5 ~/.canon/log/canon-sentinel.log
+
+  ★이미 돌고 있는 다른 감시기에 이 관심사를 얹지 마라 — 별도 Label·별도 프로세스·별도 로그다.
+    가동 중 자산을 고치면 그 감시까지 함께 죽는다(실패 반경이 합쳐진다).
+
+  주기 근거: 정본은 거의 안 바뀌므로 부하는 무의미하게 작고(참조 실측 60ms/회·156파일 0.7MB),
+             감염은 빨리 알수록 좋다. 300초 = 탐지 창 최대 5분.
+  ⚠ launchd 의 StartInterval 은 절전 중 발화를 통째로 놓친다(기상 시 따라잡지 않는다).
+    노트북처럼 자주 자는 기계라면 그 공백이 곧 사각이다 — 상시 가동 서버에 두는 편이 낫다.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.canon-sentinel</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__KIT_ROOT__/scripts/canon-sentinel.sh</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>__HOME__</string>
+    <key>CANON_HOME</key><string>__HOME__/.canon</string>
+  </dict>
+  <key>StartInterval</key><integer>300</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>__HOME__/.canon/log/canon-sentinel.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/.canon/log/canon-sentinel.log</string>
+</dict>
+</plist>

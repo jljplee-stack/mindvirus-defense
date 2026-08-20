@@ -1,0 +1,20 @@
+# mindvirus-defense kit — 층 ② 상주 (systemd user unit)  [예시]
+#
+# 설치:
+#   mkdir -p ~/.config/systemd/user ~/.canon/log
+#   sed -e "s|__KIT_ROOT__|$HOME/mindvirus-defense|g" canon-sentinel.service \
+#       > ~/.config/systemd/user/canon-sentinel.service
+#   cp canon-sentinel.timer ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now canon-sentinel.timer
+# 검증:
+#   systemctl --user list-timers | grep canon
+#   journalctl --user -u canon-sentinel -n 20
+
+[Unit]
+Description=canon integrity sentinel (mindvirus-defense layer 2)
+
+[Service]
+Type=oneshot
+Environment=CANON_HOME=%h/.canon
+ExecStart=/bin/bash __KIT_ROOT__/scripts/canon-sentinel.sh

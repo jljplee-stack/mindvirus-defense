@@ -1,0 +1,9 @@
+# mindvirus-defense kit — 층 ② 상주 (cron)  [예시]
+#
+#   crontab -e 로 아래 한 줄을 넣는다(경로는 사이트에 맞게 고친다).
+#   cron 은 로그인 셸 환경을 안 물려받는다 — CANON_* 를 명시하거나 canon.env 를 source 하라.
+#
+*/5 * * * * . $HOME/.canon/canon.env 2>/dev/null; $HOME/mindvirus-defense/scripts/canon-sentinel.sh >> $HOME/.canon/log/canon-sentinel.log 2>&1
+#
+# ⚠ cron 은 기계가 꺼져 있던 회차를 따라잡지 않는다. 그 공백이 감시 사각이다.
+#   자주 자는 기계라면 systemd timer(Persistent=true)나 상시 가동 서버를 쓰는 편이 낫다.

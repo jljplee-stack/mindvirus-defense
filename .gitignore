@@ -1,0 +1,10 @@
+# 내부 자료 — 공개 대상 아님
+.briefs/
+
+# 운영 상태(이 저장소에 들어와선 안 되는 것들)
+baseline.tsv
+resign-ledger.jsonl
+alert-state.tsv
+alerts.log
+*.bak-*
+.DS_Store
