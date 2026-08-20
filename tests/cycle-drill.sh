@@ -199,6 +199,43 @@ want 0 $? "편집 감지 후 자동 재서명"
 grep -q '4. 편집기로 추가한 줄' "$T/docs/CLAUDE.md" && ok "편집 내용이 실제로 반영됨" || bad "편집이 반영되지 않았다"
 unset EDITOR
 
+head_ "★경보 전송이 실패하면 억제하지 않는가 (실패 → 재발화 / 성공 → 억제)"
+printf '5. 전송 실패 시험용 변조\n' >> "$T/docs/CLAUDE.md"
+printf '#!/bin/sh\ncat >/dev/null\nexit 1\n' > "$T/work/bad-channel.sh"   # 항상 실패하는 채널
+chmod +x "$T/work/bad-channel.sh"
+before=$(grep -c '【경고】' "$CANON_ALERT_LOG")
+CANON_ALERT_CMD="$T/work/bad-channel.sh" "$BIN/canon-sentinel.sh" >/dev/null 2>&1
+want 3 $? "전송 실패를 종료코드 3으로 알린다(조용히 성공하지 않는다)"
+[ ! -f "$CANON_ALERT_STATE.pending" ] && ok "미확정 상태 파일이 남지 않는다" || bad "pending 이 남았다"
+"$BIN/canon-sentinel.sh" >/dev/null 2>&1
+after=$(grep -c '【경고】' "$CANON_ALERT_LOG")
+[ "$after" = "$((before+1))" ] && ok "정상 채널로 다시 돌리자 같은 경보가 재발화(전송 실패가 억제되지 않았다)" \
+  || bad "재발화하지 않았다 — 전송 실패가 영구 유실을 만든다(경보 ${before}→${after})"
+"$BIN/canon-sentinel.sh" >/dev/null 2>&1
+again=$(grep -c '【경고】' "$CANON_ALERT_LOG")
+[ "$again" = "$after" ] && ok "전송 성공 뒤에는 정상적으로 억제된다(대조군 — 늘 재발화하는 것이 아니다)" \
+  || bad "성공 후에도 재발화한다(억제가 깨졌다)"
+"$BIN/canon-resign.sh" --all --reason "드릴 정리" >/dev/null 2>&1
+"$BIN/canon-sentinel.sh" >/dev/null 2>&1 || true
+
+head_ "★python3 를 못 찾을 때 조용히 죽지 않는가 (감시 공백을 알린다)"
+NOPY="$T/work/nopy"; mkdir -p "$NOPY"
+for c in date mkdir cat dirname; do
+  src="$(command -v "$c")"; [ -n "$src" ] && ln -sf "$src" "$NOPY/$c"
+done
+BASH_ABS="$(command -v bash)"      # PATH 를 좁히기 전에 절대경로를 잡아 둔다
+: > "$T/canon/nopy-alerts.log"
+PATH="$NOPY" CANON_ALERT_CMD="" CANON_ALERT_LOG="$T/canon/nopy-alerts.log" \
+  "$BASH_ABS" "$BIN/canon-sentinel.sh" >/dev/null 2>&1
+want 3 $? "python3 부재를 종료코드 3으로 알린다"
+if grep -q '【경고】 canon-sentinel 판정 불가' "$T/canon/nopy-alerts.log" 2>/dev/null; then
+  ok "경보 채널로 「감시 공백」을 실제로 발신했다(침묵사하지 않는다)"
+else
+  bad "python3 부재인데 경보가 나가지 않았다(조용히 죽었다)"
+fi
+grep -q 'PATH=' "$T/canon/nopy-alerts.log" 2>/dev/null && ok "진단에 필요한 PATH 를 본문에 실었다" \
+  || bad "PATH 진단이 본문에 없다"
+
 head_ "★attest 후 부트스트랩 세탁 봉쇄 — 베이스라인을 지워도 다시 못 찍는다"
 "$BIN/canon-resign.sh" --attest --reason "드릴 — 오케스트레이터 검토 확인" >/dev/null 2>&1
 want 0 $? "attest 기록"

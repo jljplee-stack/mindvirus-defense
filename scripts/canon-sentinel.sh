@@ -57,7 +57,17 @@ DRY=0
 case " $* " in *" --dry-run "*) DRY=1 ;; esac
 
 PY="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || printf '')"
-[ -n "$PY" ] || { echo "canon-sentinel: python3 부재 — 판정 불가" >&2; exit 3; }
+if [ -z "$PY" ]; then
+  # ★조용히 죽지 않는다. 감시기 자신의 의존성이 없는 것도 사건이고, 그 사건은 경보 채널로 나가야 한다.
+  #   (특히 cron 은 로그인 셸의 PATH 를 물려받지 않아 이 일이 실제로 흔하다.)
+  {
+    printf '【경고】 canon-sentinel 판정 불가 — python3 를 찾지 못해 무결성 대조가 돌지 않았다.\n'
+    printf '  지금 감시는 공백 상태다. 스케줄러 항목에 PATH 를 명시하라.\n'
+    printf '  현재 PATH=%s\n' "$PATH"
+  } | deliver_alert BROKEN
+  echo "canon-sentinel: python3 부재 — 판정 불가(경보 발신함)" >&2
+  exit 3
+fi
 
 # ── self-test 는 아래 배터리로 분기 ────────────────────────────────
 case " $* " in *" --self-test "*) exec "$0" --run-self-test-impl ;; esac
@@ -179,13 +189,14 @@ if lines:
     lines.append("  전체 대조: %s" % os.environ.get("VERIFY", "canon-verify.sh"))
 
 # 상태 갱신(현재 finding 지문만 남긴다 — 해소분은 제거)
+# ★여기서 바로 확정하지 않는다. **전송이 성공한 뒤에만** 셸이 확정한다.
+#   먼저 확정해 버리면, 경보 채널이 죽어 있을 때 그 경보가 「이미 보낸 것」으로 억제되어
+#   영구히 유실된다(적대 검토 실측). 전송 실패는 재발화로 이어져야 한다.
 if os.environ.get("DRY") != "1":
-    tmp = state_path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
+    with open(state_path + ".pending", "w", encoding="utf-8") as fh:
         for k, f in sorted(cur.items()):
             first = prev.get(k, {}).get("first_seen", now)
             fh.write("%s\t%s\t%s\t%s\t%s\n" % (k, f["path"], f["level"], f["kind"], first))
-    os.replace(tmp, state_path)
 
 rc = 0
 if alerts: rc = 2
@@ -199,18 +210,30 @@ RC="$(printf '%s' "$OUT" | head -1 | sed -n 's/.*RC=\([0-9]\).*/\1/p')"
 BODY="$(printf '%s' "$OUT" | tail -n +2)"
 [ -n "$RC" ] || RC=3
 
+# 보낼 것이 없으면(새 finding·해소 모두 없음) 상태만 확정하고 끝낸다.
 if [ -z "$BODY" ]; then
+  [ -f "$STATE.pending" ] && mv "$STATE.pending" "$STATE"
   exit "$RC"
 fi
 
 if [ "$DRY" = "1" ]; then
   printf '%s\n' "$BODY"
   echo "[dry-run] 위 내용이 경보 채널로 나갔을 것. rc=$RC (상태 미갱신)"
+  rm -f "$STATE.pending"
   exit "$RC"
 fi
 
 MSGF="$(mktemp)"; printf '%s\n' "$BODY" > "$MSGF"
 case "$RC" in 2) LVL=ALERT ;; 1) LVL=NOTICE ;; *) LVL=NOTICE ;; esac
-deliver_alert "$LVL" < "$MSGF"
+deliver_alert "$LVL" < "$MSGF"; DRC=$?
 rm -f "$MSGF"
-exit "$RC"
+
+# ★전송 성공 뒤에만 상태를 확정한다. 실패하면 pending 을 버려서 **다음 실행에 다시 발화**하게 한다.
+if [ "$DRC" = "0" ]; then
+  [ -f "$STATE.pending" ] && mv "$STATE.pending" "$STATE"
+  exit "$RC"
+fi
+rm -f "$STATE.pending"
+echo "canon-sentinel: 경보 전송 실패(rc=$DRC) — 상태를 확정하지 않는다(다음 실행에 재발화)." >&2
+echo "  채널 명령: ${ALERT_CMD:-(내장 파일 폴백 → $ALERT_LOG)}" >&2
+exit 3

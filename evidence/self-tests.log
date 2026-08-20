@@ -7,7 +7,7 @@ verify     self-test OK — 11 배터리(정상·strict변조·append정상·app
 resign     self-test OK — 7 배터리(사유필수·대상필수·rebuild·무변경·append원장보존·범위밖거부·unsign)
 edit       self-test OK — 3 배터리(파일필수·사유필수·실존필수)
 sentinel   self-test OK — 5 배터리(정상무push·변조ALERT·재발화억제·재서명해소·해소후정지)
-guard      self-test OK — 42 케이스(차단 27·통과 14·deny JSON 계약 1)
+guard      self-test OK — 51 케이스(차단 33·통과 17·deny JSON 계약 1)
 installer  OK — 인자 없으면 usage 후 거부(exit 4)
 alert-cmd  OK — stdin 본문이 채널로 그대로 전달됨
 hygiene    OK — 금지 표현 0건 + 게이트 자기 검산 통과

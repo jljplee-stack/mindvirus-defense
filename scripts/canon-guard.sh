@@ -186,6 +186,38 @@ DEST_LAST_CMDS = {"mv", "cp", "install", "ln", "rsync"}
 INTERPRETERS   = {"python", "python3", "python2", "perl", "ruby", "node", "osascript", "php"}
 ESCAPES        = ("bash -c", "sh -c", "zsh -c", "eval ", "$(", "`", "xargs")
 
+# ★세그먼트 앞에 붙어 실제 명령을 가리는 것들. 이것을 벗기지 않으면
+#   `LANG=C tee <정본>` · `env tee <정본>` · `command tee <정본>` 이 전부 통과한다
+#   (분석기가 첫 토큰만 명령으로 보기 때문). 2026 공개 전 적대 검토에서 실측된 우회다.
+_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+WRAPPERS = {"env", "command", "builtin", "exec", "nohup", "nice", "ionice",
+            "stdbuf", "time", "setsid", "doas", "sudo"}
+# 값을 하나 더 먹는 옵션(래퍼별) — 그 값을 명령 이름으로 오인하지 않기 위해 함께 건너뛴다
+WRAPPER_OPTS_WITH_ARG = {"-u", "--unset", "-n", "-c", "--chdir", "-o", "-e", "-i0", "-S", "--user"}
+
+def strip_prefixes(seg):
+    """환경변수 할당·래퍼를 벗겨 **실제 명령 토큰부터 시작하는** 세그먼트를 돌려준다.
+    벗길 수 없으면 원본을 그대로 돌려준다(과차단보다 원형 유지가 안전한 지점은 없다 —
+    이 층은 예방이므로, 애매하면 아래 ⑤ 잔여 스캔이 다시 본다)."""
+    i, n = 0, len(seg)
+    while i < n:
+        t = seg[i]
+        if _ASSIGN_RE.match(t):          # LANG=C · FOO=bar
+            i += 1; continue
+        if os.path.basename(t) in WRAPPERS:   # env · command · nice · sudo …
+            i += 1
+            while i < n:
+                a = seg[i]
+                if _ASSIGN_RE.match(a):       # env FOO=bar cmd
+                    i += 1; continue
+                if a.startswith("-"):
+                    i += 2 if a in WRAPPER_OPTS_WITH_ARG else 1
+                    continue
+                break
+            continue
+        break
+    return seg[i:] if i < n else seg
+
 def _redirect_targets(tokens):
     """'>' '>>' '>|' 및 붙여쓴 형태(x>file)의 **대상**만 뽑는다.
     (grep foo canon.md > /tmp/out 처럼 정본을 *읽고* 딴 데 쓰는 건 막지 않기 위해 대상만 본다)"""
@@ -237,7 +269,10 @@ def analyze_bash(cmd, protected=None):
             return True, "리다이렉션 대상이 정본: %s (규칙 %s)" % (t, hit)
 
     # ② 명령별
-    for seg in _segments(tokens):
+    for raw_seg in _segments(tokens):
+        if not raw_seg:
+            continue
+        seg = strip_prefixes(raw_seg)        # ★LANG=C · env · command … 를 벗기고 본다
         if not seg:
             continue
         base = os.path.basename(seg[0])
@@ -264,8 +299,11 @@ def analyze_bash(cmd, protected=None):
                     hit = is_canon(a[3:], protected)
                     if hit:
                         return True, "dd of= 가 정본: %s (규칙 %s)" % (a[3:], hit)
+        # ★제자리 수정 옵션은 짧은 표기와 긴 표기를 **함께** 본다.
+        #   `sed --in-place` 만 검사에서 빠져 있던 것이 적대 검토에서 실측됐다.
         if base in ("sed", "gsed", "perl", "ruby") and any(
-                a == "-i" or a.startswith("-i") and len(a) <= 12 for a in args):
+                a == "-i" or (a.startswith("-i") and len(a) <= 12)
+                or a == "--in-place" or a.startswith("--in-place=") for a in args):
             for a in pos:
                 hit = is_canon(a, protected)
                 if hit:
@@ -406,6 +444,13 @@ def self_test():
     chk("B15 chmod",             B("chmod 000 %s/CLAUDE.md" % G), True)
     chk("B16 && 뒤 세그먼트",     B("cd /tmp && rm %s/CLAUDE.md" % G), True)
     chk("B17 heredoc 리다이렉트",  B("cat > %s/CLAUDE.md <<EOF" % G), True)
+    # ★B18~B23 = 공개 전 적대 검토에서 실측된 우회(첫 토큰만 보던 결함) — 이제 막힌다
+    chk("B18 환경변수 접두 tee",   B("LANG=C tee %s/CLAUDE.md" % G), True)
+    chk("B19 환경변수 접두 rm",    B("LANG=C rm %s/CLAUDE.md" % G), True)
+    chk("B20 env 래퍼",           B("/usr/bin/env tee %s/CLAUDE.md" % G), True)
+    chk("B21 command 래퍼",       B("command tee %s/CLAUDE.md" % G), True)
+    chk("B22 sed 긴 옵션",         B("sed --in-place s/a/b/ %s/CLAUDE.md" % G), True)
+    chk("B23 접두+래퍼 중첩",      B("LANG=C /usr/bin/env FOO=1 tee -a %s/soul.md" % G), True)
 
     # ── 통과해야 하는 것(과차단 방지) ──
     chk("A1 정본 읽기 cat",       B("cat %s/CLAUDE.md" % G), False)
@@ -420,6 +465,10 @@ def self_test():
     chk("A10 보고 채널 append",   B("cat >> %s/inbox.md" % WK), False)
     chk("A11 cp 소스가 정본",     B("cp %s/CLAUDE.md /tmp/backup.md" % G), False)
     chk("A12 빈 명령",            B(""), False)
+    # ★A13~A15 = 접두 정규화가 **과차단으로 번지지 않는지** 보는 대조군
+    chk("A13 환경변수 접두 읽기",   B("LANG=C cat %s/CLAUDE.md" % G), False)
+    chk("A14 env 래퍼 무관 경로",   B("/usr/bin/env tee /tmp/out.txt"), False)
+    chk("A15 접두 붙은 무관 rm",    B("LANG=C rm -rf /tmp/scratch"), False)
 
     # deny JSON 형태 계약
     import io, contextlib
@@ -438,9 +487,9 @@ def self_test():
 
     if fails:
         print("\n".join("  FAIL " + f for f in fails), file=sys.stderr)
-        print("self-test: %d 실패 / 42 케이스" % len(fails), file=sys.stderr)
+        print("self-test: %d 실패 / 51 케이스" % len(fails), file=sys.stderr)
         return 1
-    print("self-test OK — 42 케이스(차단 27·통과 14·deny JSON 계약 1)")
+    print("self-test OK — 51 케이스(차단 33·통과 17·deny JSON 계약 1)")
     return 0
 
 if os.environ.get("CANON_GUARD_SELF_TEST"):
