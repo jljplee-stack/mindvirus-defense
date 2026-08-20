@@ -3,6 +3,9 @@
 #   crontab -e 로 아래 한 줄을 넣는다(경로는 사이트에 맞게 고친다).
 #   cron 은 로그인 셸 환경을 안 물려받는다 — CANON_* 를 명시하거나 canon.env 를 source 하라.
 #
+# ★PATH 를 명시한다 — cron 의 기본 PATH 는 좁아서 python3 를 못 찾는 일이 흔하고,
+#   그러면 sentinel 이 경보 없이 멈춘다(docs/LIMITS.md §8).
+PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 */5 * * * * . $HOME/.canon/canon.env 2>/dev/null; $HOME/mindvirus-defense/scripts/canon-sentinel.sh >> $HOME/.canon/log/canon-sentinel.log 2>&1
 #
 # ⚠ cron 은 기계가 꺼져 있던 회차를 따라잡지 않는다. 그 공백이 감시 사각이다.

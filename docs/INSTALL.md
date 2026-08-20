@@ -1,7 +1,7 @@
 # 설치 절차서
 
 mindvirus-defense kit · MIT
-⚠ 이 문서의 명령은 **오케스트레이터(이하 master) 또는 사람 운영자가 집행**한다.
+⚠ 이 문서의 명령은 **오케스트레이터 또는 사람 운영자가 집행**한다.
 하위 에이전트는 층 ③으로 정본을 못 쓰고, 층 ②의 재서명 권한도 없다 — 설계대로다.
 
 전제: `bash` · `python3`(없으면 `python`) · POSIX 유틸. 외부 의존성 0. 네트워크 불요.
@@ -99,7 +99,7 @@ bash scripts/canon-resign.sh --attest \
 
 각 파일 머리에 설치·검증 명령이 그대로 적혀 있다.
 
-### ★강제발화 검증 (필수 — 안 돈 경로는 미검증 코드다)
+### ★실동작 검증 (필수 — 안 돈 경로는 미검증 코드다)
 
 ```bash
 cp ~/.canon/inventory.conf /tmp/inv.orig
@@ -138,12 +138,13 @@ bash hooks/install-canon-guard.sh --apply
 CANON_GUARD_SETTINGS=/path/to/agents/settings.json bash hooks/install-canon-guard.sh --apply
 ```
 
-### ★강제발화 검증 (필수)
+### ★실동작 검증 (필수)
 새 에이전트 1기를 띄워 **실제로 막히는지** 본다.
 ```
 그 에이전트에 지시: "<정본 파일> 끝에 '테스트' 한 줄을 추가하라"
-기대: 「정본은 master 게이트다 — 허브 채널로 격상하라」로 차단당하고 파일은 불변.
-확인: shasum -a 256 <정본 파일>   →  베이스라인 값과 대조
+기대: 「정본 변경은 오케스트레이터의 승인 사항이다 — 오케스트레이터에게 에스컬레이션하라」로 차단당하고 파일은 불변.
+확인: python3 -c "import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" <정본 파일>
+      →  베이스라인 값과 대조 (shasum(1) 은 배포판에 따라 없다)
       bash scripts/canon-verify.sh   →  [CLEAN] 이어야 한다
 ```
 ⚠ **이미 열린 세션에는 즉시 반영되지 않을 수 있다.** 기존 노드는 재기동 후 확인한다.
@@ -159,9 +160,9 @@ CANON_GUARD_SETTINGS=/path/to/agents/settings.json bash hooks/install-canon-guar
 그것을 **교체**해야 한다. 두 문장이 공존하면 어느 쪽을 따를지가 노드의 해석에 맡겨지고,
 **그 틈이 정확히 위조가 사는 자리다.**
 
-지침 자체가 정본이므로, 박제는 `canon-edit.sh` 로 한다(편집과 재서명이 한 트랜잭션):
+지침 자체가 정본이므로, 반영은 `canon-edit.sh` 로 한다(편집과 재서명이 한 트랜잭션):
 ```bash
-EDITOR=vi bash scripts/canon-edit.sh <지침 파일> --reason "허브-스포크 조항 박제 (승인 근거)"
+EDITOR=vi bash scripts/canon-edit.sh <지침 파일> --reason "허브-스포크 조항 반영 (승인 근거)"
 ```
 
 ---

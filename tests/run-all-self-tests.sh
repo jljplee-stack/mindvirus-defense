@@ -36,6 +36,15 @@ else
 fi
 rm -rf "$T"
 
+# 공개 위생 게이트 + 그 게이트가 눈이 멀지 않았는지 자기 검산
+total=$((total+1)); printf '%-10s ' "hygiene"
+if bash "$KIT_ROOT/tests/publish-hygiene.sh" >/dev/null 2>&1 \
+   && bash "$KIT_ROOT/tests/publish-hygiene.sh" --mutation >/dev/null 2>&1; then
+  printf 'OK — 금지 표현 0건 + 게이트 자기 검산 통과\n'
+else
+  printf 'FAIL — 아래를 직접 확인하라: tests/publish-hygiene.sh\n'; fails=$((fails+1))
+fi
+
 echo "─────────────────────────────────────────"
 if [ "$fails" = "0" ]; then echo "전건 통과 ($total 묶음)"; exit 0; fi
 echo "실패 $fails / $total 묶음" >&2; exit 1

@@ -1,0 +1,14 @@
+# 공개 위생 게이트 로그 — 금지 표현·식별자 전수 계수 + 게이트 자기 검산
+# 실행 2026-08-21 · Darwin · Python 3.14.7 · bash 3.2.57(1)-release
+# ※ 경로 표기만 치환했다(킷 경로→<KIT>, 홈→~, 임시디렉터리→<TMPDIR>).
+#   판정·종료코드·건수는 실행 원본 그대로이고, 맨 아래 exit 는 실행 rc 를 그대로 기록한 것이다.
+
+검사 대상 33 개 파일
+금지 패턴 ①②③: oogisoogi|/Users/[a-z]|/home/[a-z]|/var/folders|박사님|자비스|페인|갈무리|폐역|박제|고스트|인박스|워커|주인님|강제발화|surface:[0-9]|master#
+금지 패턴 ④ 이메일: [A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z][A-Za-z]+   (예외: RFC 2606 예약 도메인 @(example\.(com|org|net)|[A-Za-z0-9.-]*\.invalid))
+─────────────────────────────────────────
+억제(정당) 내역: 이 스크립트 자신 1개 파일 · 예약 예시 도메인 1건
+    ./examples/canon.env.example:30:# export CANON_MAIL_TO="ops@example.com"
+공개 위생 0건 — 클린
+
+exit=0

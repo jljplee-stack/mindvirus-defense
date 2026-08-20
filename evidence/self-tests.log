@@ -1,5 +1,5 @@
 # 자체 배터리 전건 실행 로그 — mindvirus-defense kit
-# 실행 2026-08-21T07:52:23+0900 · Darwin 25.6.0 arm64 · Python 3.14.7 · bash 3.2.57(1)-release
+# 실행 2026-08-21 · Darwin · Python 3.14.7 · bash 3.2.57(1)-release
 # ※ 경로 표기만 치환했다(킷 경로→<KIT>, 홈→~, 임시디렉터리→<TMPDIR>).
 #   판정·종료코드·건수는 실행 원본 그대로이고, 맨 아래 exit 는 실행 rc 를 그대로 기록한 것이다.
 
@@ -10,7 +10,8 @@ sentinel   self-test OK — 5 배터리(정상무push·변조ALERT·재발화억
 guard      self-test OK — 42 케이스(차단 27·통과 14·deny JSON 계약 1)
 installer  OK — 인자 없으면 usage 후 거부(exit 4)
 alert-cmd  OK — stdin 본문이 채널로 그대로 전달됨
+hygiene    OK — 금지 표현 0건 + 게이트 자기 검산 통과
 ─────────────────────────────────────────
-전건 통과 (7 묶음)
+전건 통과 (8 묶음)
 
 exit=0

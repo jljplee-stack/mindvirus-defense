@@ -5,8 +5,8 @@
 # 왜: 편집과 서명이 따로 놀면 "고치고 서명을 깜빡한다" → 경보가 울린다 → 사람이 경보에 둔감해진다.
 #     경보 피로는 감시 체계를 죽이는 가장 흔한 사인이다. 그래서 정당 편집의 정본 입구를 하나로 만든다.
 #
-# 사용:  canon-edit.sh <정본파일> --reason "<박제 근거>"
-#        EDITOR=nano canon-edit.sh ~/agents/CLAUDE.md --reason "ADR-12 박제(오너 승인 2026-01-15)"
+# 사용:  canon-edit.sh <정본파일> --reason "<변경 근거>"
+#        EDITOR=nano canon-edit.sh ~/agents/CLAUDE.md --reason "ADR-12 반영(소유자 승인 2026-01-15)"
 #
 # 절차: ⑴ 인벤토리 소속·현재 무결성 확인(더러우면 거부 — 먼저 해소하라)
 #       ⑵ $EDITOR 로 편집
@@ -42,7 +42,7 @@ if [ "${SELFTEST:-0}" = "1" ]; then
 fi
 
 [ -n "$FILE" ]   || { echo "canon-edit: 대상 파일 필요"   >&2; exit 4; }
-[ -n "$REASON" ] || { echo "canon-edit: --reason 필수 — 근거 없는 박제는 박제가 아니다" >&2; exit 4; }
+[ -n "$REASON" ] || { echo "canon-edit: --reason 필수 — 근거 없는 변경 확정은 확정이 아니다" >&2; exit 4; }
 [ -f "$FILE" ]   || { echo "canon-edit: 파일 없음: $FILE" >&2; exit 4; }
 
 # ⑴ 선행 무결성 — 이미 경보 상태면 편집을 얹지 않는다(무단 변경을 정당 편집으로 세탁 방지).
@@ -50,7 +50,7 @@ fi
 if [ "$PRE" = "2" ]; then
   if grep -qF "$FILE" /tmp/.canon-edit-pre.$$; then
     echo "canon-edit 거부: '$FILE' 은 이미 무단 변경 경보 상태다." >&2
-    echo "  ⛔ 그 위에 편집을 얹으면 무단 변경이 정당 박제로 세탁된다." >&2
+    echo "  ⛔ 그 위에 편집을 얹으면 무단 변경이 정당한 변경으로 세탁된다." >&2
     echo "  먼저 해소하라 — 원상복구 후 편집하거나, 변경 내용을 확인하고 별도 사유로 재서명하라." >&2
     grep -A3 -F "$FILE" /tmp/.canon-edit-pre.$$ >&2
     rm -f /tmp/.canon-edit-pre.$$; exit 6
@@ -62,16 +62,30 @@ if [ "$PRE" = "3" ]; then
 fi
 rm -f /tmp/.canon-edit-pre.$$
 
-BEFORE="$(shasum -a 256 "$FILE" | awk '{print $1}')"
+# 해시는 python 으로 낸다 — shasum(1) 은 POSIX 표준이 아니고 배포판마다 없다(sha256sum 만 있거나
+# 둘 다 없다). 이 킷은 이미 python3 를 요구하므로 의존성을 그쪽으로 통일한다. 값은 동일하다.
+CANON_PY="${CANON_PY:-$(command -v python3 2>/dev/null || command -v python 2>/dev/null)}"
+[ -n "$CANON_PY" ] || { echo "canon-edit: python3 부재 — 해시 대조 불가" >&2; exit 3; }
+_sha256() {
+  "$CANON_PY" - "$1" <<'PYEOF'
+import hashlib, sys
+h = hashlib.sha256()
+with open(sys.argv[1], "rb") as f:
+    for chunk in iter(lambda: f.read(1 << 20), b""):
+        h.update(chunk)
+print(h.hexdigest())
+PYEOF
+}
+BEFORE="$(_sha256 "$FILE")"
 "${EDITOR:-vi}" "$FILE"
-AFTER="$(shasum -a 256 "$FILE" | awk '{print $1}')"
+AFTER="$(_sha256 "$FILE")"
 
 if [ "$BEFORE" = "$AFTER" ]; then
   echo "canon-edit: 변경 없음 — 재서명 불요."
   exit 0
 fi
 
-echo "canon-edit: 변경 감지 ${BEFORE:0:16} -> ${AFTER:0:16} · 즉시 재서명"
+echo "canon-edit: 변경 감지 $(printf '%.16s' "$BEFORE") -> $(printf '%.16s' "$AFTER") · 즉시 재서명"
 "$RESIGN" "$FILE" --reason "$REASON" || exit $?
 "$VERIFY" >/dev/null 2>&1
 case $? in

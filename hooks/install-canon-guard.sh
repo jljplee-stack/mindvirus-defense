@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # install-canon-guard.sh — 층 ③ 훅을 에이전트 공용 settings.json 에 **멱등** 설치/제거.
 # mindvirus-defense kit · MIT
-# ⛔ 하위 에이전트의 임의 실행 금지 — master(오케스트레이터) 승인 후 집행.
+# ⛔ 하위 에이전트의 임의 실행 금지 — 오케스트레이터 승인 후 집행.
 #
 # 대상 설정 파일: CANON_GUARD_SETTINGS (기본 = ${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json)
 #   ※ 에이전트들이 별도 CLAUDE_CONFIG_DIR 를 쓴다면 그 경로를 반드시 명시하라 —

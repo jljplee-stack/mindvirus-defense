@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# canon-resign.sh — 정본 재서명(정당 박제 확정). 편집과 재서명을 한 트랜잭션으로 묶는 짝은 canon-edit.sh.
+# canon-resign.sh — 정본 재서명(정당한 변경의 확정). 편집과 재서명을 한 트랜잭션으로 묶는 짝은 canon-edit.sh.
 # mindvirus-defense kit — 층 ② (무결성 워치) · MIT
 #
 # 설계 원칙:
 #   ⑴ **사유 필수** — 근거 없는 서명은 서명이 아니다. --reason 없으면 거부(exit 4).
 #   ⑵ **원장은 append-only** — resign-ledger.jsonl 은 open(...,'a') 로만 쓴다(지침 6-10).
 #      베이스라인(baseline.tsv)은 원장이 아니라 *현재 상태 스냅샷*이므로 원자적 전량 교체가 맞다.
-#   ⑶ **행위자 게이트** — 하위 노드(워커·리뷰어 등)의 재서명은 거부(exit 5). 정본 박제는 오케스트레이터
-#      (이하 master) 권한이다. 역할 미상(사람 셸)은 통과 — 사람이 직접 치는 명령까지 막지는 않는다.
+#   ⑶ **행위자 게이트** — 하위 노드(에이전트·검증자 등)의 재서명은 거부(exit 5). 정본 변경의 확정은 오케스트레이터
+#      (orchestrator) 권한이다. 역할 미상(사람 셸)은 통과 — 사람이 직접 치는 명령까지 막지는 않는다.
 #      역할 판정은 사이트마다 다르므로 CANON_ROLE / CANON_ROLE_CMD 로 플러그인한다.
 #
 # 사용:
 #   canon-resign.sh --rebuild --reason "최초 베이스라인 서명"
-#   canon-resign.sh ~/agents/CLAUDE.md --reason "ADR-12 박제(오너 승인 2026-01-15)"
+#   canon-resign.sh ~/agents/CLAUDE.md --reason "ADR-12 반영(소유자 승인 2026-01-15)"
 #   canon-resign.sh --all --reason "정기 재서명" # 현재 불일치 전부
-#   canon-resign.sh --attest --reason "master 검토 확인"  # 해시 불변·검토 사실만 원장에 기록
+#   canon-resign.sh --attest --reason "오케스트레이터 검토 확인"  # 해시 불변·검토 사실만 원장에 기록
 #   canon-resign.sh --self-test
 #
 # 종료코드: 0 성공 | 3 설정오류 | 4 사유 누락/인자 오류 | 5 권한 거부
@@ -55,16 +55,16 @@ if [ "${CANON_RESIGN_TEST:-}" = "1" ] && [ -n "${CANON_BASELINE:-}" ]; then
 fi
 # ⑶ 최초 부트스트랩: 베이스라인이 **아직 없고** --rebuild 일 때만.
 #    근거 — 최초 서명은 "변경을 승인"하는 행위가 아니라 "현재 상태를 사진 찍는" 행위다.
-#    그 사진의 값어치는 master가 그것을 검토(--attest)할 때 생긴다. 그리고 베이스라인이
-#    이미 있으면 이 면제는 즉시 닫히므로, 워커가 나중 편집을 세탁하는 데 쓸 수 없다.
-#    ★봉쇄 조건 추가(2026-08-21 자기점검): 베이스라인 파일만 조건으로 두면 워커가 그 파일을
-#      지우고 다시 부트스트랩해 무단 변경을 세탁할 수 있다. 그래서 **원장에 master의 attest
+#    그 사진의 값어치는 오케스트레이터가 그것을 검토(--attest)할 때 생긴다. 그리고 베이스라인이
+#    이미 있으면 이 면제는 즉시 닫히므로, 하위 에이전트가 나중 편집을 세탁하는 데 쓸 수 없다.
+#    ★봉쇄 조건 추가(2026-08-21 자기점검): 베이스라인 파일만 조건으로 두면 하위 에이전트가 그 파일을
+#      지우고 다시 부트스트랩해 무단 변경을 세탁할 수 있다. 그래서 **원장에 오케스트레이터의 attest
 #      기록이 한 번이라도 있으면 부트스트랩 면제는 영구히 닫힌다**(원장은 append-only라 지울 수 없다).
 case " $* " in
   *" --rebuild "*)
     if [ ! -f "$BASELINE" ]; then
       if [ -f "$LEDGER" ] && grep -q '"action": *"attest"' "$LEDGER" 2>/dev/null; then
-        : # master가 이미 검토 확인했다 — 재부트스트랩 면제 없음
+        : # 오케스트레이터가 이미 검토 확인했다 — 재부트스트랩 면제 없음
       else
         _gate_exempt=1
       fi
@@ -77,7 +77,7 @@ case "$_gate_exempt" in 1) : ;; *)
     case "$ROLE" in
       $_pat)
         echo "canon-resign DENY: role=$ROLE 은 정본 재서명 권한이 없다." >&2
-        echo "  정본 박제는 master 게이트다 — 허브 채널로 격상하라(【결정필요】 + 대조표)." >&2
+        echo "  정본 변경은 오케스트레이터의 승인 사항이다 — 오케스트레이터에게 에스컬레이션하라(변경 내용 대조표 첨부)." >&2
         exit 5 ;;
     esac
   done
@@ -223,8 +223,8 @@ def parse_args(argv):
     return reason, targets, rebuild, all_diff, attest, None
 
 def do_attest(reason):
-    """master 검토 확인(attestation) — 해시를 바꾸지 않고 '내가 이 베이스라인을 읽고 인정했다'를
-    원장에 남긴다. 부트스트랩 사진(워커가 찍은 것)이 정당 정본이 되는 유일한 경로다."""
+    """오케스트레이터 검토 확인(attestation) — 해시를 바꾸지 않고 '내가 이 베이스라인을 읽고 인정했다'를
+    원장에 남긴다. 부트스트랩 사진(하위 에이전트가 찍은 것)이 정당 정본이 되는 유일한 경로다."""
     if not os.path.isfile(BASELINE):
         print("canon-resign --attest: 베이스라인이 없다 — 먼저 --rebuild", file=sys.stderr)
         return 3
@@ -245,7 +245,7 @@ def main(argv):
         print("canon-resign: %s" % err, file=sys.stderr); return 4
     if not reason or not reason.strip():
         print("canon-resign: --reason 필수 — 근거 없는 서명은 서명이 아니다.", file=sys.stderr)
-        print('  예) canon-resign.sh ~/agents/CLAUDE.md --reason "ADR-12 박제(오너 승인)"',
+        print('  예) canon-resign.sh ~/agents/CLAUDE.md --reason "ADR-12 반영(소유자 승인)"',
               file=sys.stderr)
         return 4
     if attest:

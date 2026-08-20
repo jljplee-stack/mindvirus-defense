@@ -43,7 +43,18 @@ if [ "$ONLY_PROT" = "0" ]; then
 fi
 
 # protected.conf 파생 — 층 ③은 ②보다 넓어야 하므로 글롭·디렉터리를 디렉터리로 넓힌다.
-if [ -f "$PROTECTED" ] && [ "$ONLY_PROT" = "0" ]; then
+#
+# ★씨앗 상태(예시 인벤토리를 아직 안 고침)에서는 파생하지 않는다.
+#   예시 경로로 만든 보호 목록은 **아무것도 아닌 경로를 지키면서 정상으로 보인다.**
+SEED_UNCHANGED=0
+if [ -f "$INVENTORY" ] && [ -f "$KIT_ROOT/examples/inventory.example.conf" ]; then
+  if cmp -s "$INVENTORY" "$KIT_ROOT/examples/inventory.example.conf"; then SEED_UNCHANGED=1; fi
+fi
+if [ "$SEED_UNCHANGED" = "1" ] && [ "$ONLY_PROT" = "0" ]; then
+  say "  · protected.conf 파생 보류 — 인벤토리가 아직 예시 그대로다"
+  say "    ★인벤토리를 사이트 경로로 고친 뒤 반드시: canon-init.sh --protected"
+  say "    (그때까지 층 ③ 가드는 인벤토리에서 직접 파생한 목록으로 동작한다)"
+elif [ -f "$PROTECTED" ] && [ "$ONLY_PROT" = "0" ]; then
   say "  · protected.conf 이미 존재 — 덮지 않는다($PROTECTED)"
 elif [ -f "$INVENTORY" ]; then
   PY="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || printf '')"

@@ -16,5 +16,7 @@ Description=canon integrity sentinel (mindvirus-defense layer 2)
 
 [Service]
 Type=oneshot
+# ★PATH 를 명시한다 — python3 를 못 찾으면 sentinel 은 경보 없이 멈춘다(docs/LIMITS.md §8).
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 Environment=CANON_HOME=%h/.canon
 ExecStart=/bin/bash __KIT_ROOT__/scripts/canon-sentinel.sh

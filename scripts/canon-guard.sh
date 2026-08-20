@@ -3,6 +3,10 @@
 # mindvirus-defense kit — 층 ③ (예방·1차 방벽) · MIT
 # 설치 대상: 에이전트들이 공유하는 settings.json (예: $CLAUDE_CONFIG_DIR/settings.json)
 # matcher:  Write|Edit|MultiEdit|NotebookEdit|Bash
+#   ⚠판정 함수는 방어적으로 "Update" 라는 도구 이름도 함께 본다. 그러나 **matcher 에 없는 도구에는
+#     훅 자체가 발화하지 않는다** — 당신 플랫폼에 그런 이름의 쓰기 도구가 있으면 matcher 에 넣어라.
+#   ⚠도구 이름은 플랫폼 계약이다. 다른 이름(write_file·execute_command 등)을 쓰는 에이전트라면
+#     이 훅은 **아무것도 막지 못한다.** 반드시 당신 도구 이름으로 바꿔라(docs/LIMITS.md §9).
 #
 # 보호 경로의 정본(SOT) = $CANON_PROTECTED 파일(줄당 경로 1개, 끝의 / 는 디렉터리 접두).
 #   그 파일이 없으면 $CANON_INVENTORY(층 ②의 인벤토리)에서 파생한다 —
@@ -10,12 +14,12 @@
 #
 # ── 무엇을 막는가 ────────────────────────────────────────────────────
 # 자동 로드 정본(매 세션 컨텍스트에 주입되고 재부팅을 살아남는 파일)에 대한 **쓰기**.
-# 읽기는 막지 않는다(워커는 지침을 읽어야 한다).
+# 읽기는 막지 않는다(하위 에이전트는 지침을 읽어야 한다).
 #
 # ── 위협 모델(정직·은폐 금지) ────────────────────────────────────────
-# 대상 = ⑴ 감염된/오작동하는 협력 에이전트의 자기 확신 박제 ⑵ 고스트 위조 지시의 집행
-#        ⑶ 워커의 선의의 월권("이건 정본에 남겨야겠다").
-# ⛔ **보안 경계가 아니다.** 워커는 임의 셸을 가지므로 완전 차단은 원리적으로 불가능하다:
+# 대상 = ⑴ 감염된/오작동하는 협력 에이전트의 자기 확신의 정본 기록 ⑵ 위조된 지시의 집행
+#        ⑶ 하위 에이전트의 선의의 월권("이건 정본에 남겨야겠다").
+# ⛔ **보안 경계가 아니다.** 하위 에이전트는 임의 셸을 가지므로 완전 차단은 원리적으로 불가능하다:
 #    · `bash -c` / `eval` / 스크립트 파일 경유 / 셸 변수로 조립한 경로
 #    · python `open(p,'w')` 를 변수·base64·문자열 연산으로 은닉
 #    · 새 프로세스·다른 도구(MCP)·에디터 TUI
@@ -69,11 +73,16 @@ HOME = os.environ.get("CANON_GUARD_HOME") or os.path.expanduser("~")
 #   ③은 예방이라 넓어야 샌 곳이 안 생긴다. 정본 디렉터리를 통째로 막아도 하위 에이전트의
 #   정상 작업에는 지장이 없다(자기 TODO·프로젝트 소스·메모는 전부 통과 — self-test A군).
 #
-# 결정 순서:
-#   ⑴ $CANON_PROTECTED 파일이 있으면 그것이 SOT(줄당 경로 1개, 끝의 '/' = 디렉터리 접두).
-#   ⑵ 없으면 $CANON_INVENTORY 에서 파생한다(글롭·디렉터리는 디렉터리로 넓힌다).
+# 결정 순서 — ★**둘의 합집합**이다(어느 한쪽만 쓰지 않는다):
+#   ⑴ $CANON_PROTECTED 파일(줄당 경로 1개, 끝의 '/' = 디렉터리 접두) — 손으로 넓힌 항목
+#   ⑵ $CANON_INVENTORY 에서 파생(글롭·디렉터리는 디렉터리로 넓힌다) — 층 ②가 보는 것
 #   ⑶ 어느 쪽도 없으면 목록이 비고, 그 사실을 stderr 로 크게 알린다
 #      — 조용히 통과하는 가드가 가장 나쁘다.
+#
+# ★왜 합집합인가: 파일 하나만 SOT로 쓰면 **낡은 목록이 조용히 이긴다.** 인벤토리를 실제 경로로
+#   고쳤는데 protected.conf 가 예전(혹은 예시) 경로를 담고 있으면, 가드는 아무것도 아닌 경로만
+#   지키면서 정상으로 보인다. 합집합은 **넓어질 뿐 좁아지지 않으므로** 그 실패 방식이 없다.
+#   (③은 예방이라 넓은 것이 옳다 — 과차단 여부는 self-test A군이 지킨다.)
 # 어느 경우든 **감시 기구 자신**($CANON_HOME, $CANON_BIN)은 항상 보호 목록에 들어간다.
 
 def _self_protection():
@@ -119,16 +128,27 @@ def protected_list():
     global _PROT_CACHE
     if _PROT_CACHE is not None:
         return _PROT_CACHE
-    out, src = [], "(없음)"
+    out, srcs = [], []
     pf = os.environ.get("CANON_PROTECTED")
     inv = os.environ.get("CANON_INVENTORY")
+    have_pf = bool(pf and os.path.isfile(pf))
+    have_inv = bool(inv and os.path.isfile(inv))
     try:
-        if pf and os.path.isfile(pf):
-            out, src = _from_file(pf), pf
-        elif inv and os.path.isfile(inv):
-            out, src = _from_inventory(inv), inv + " (파생)"
+        if have_pf:
+            out += _from_file(pf); srcs.append(pf)
+        if have_inv:
+            out += _from_inventory(inv); srcs.append(inv + "(파생)")
     except OSError as e:
         print("canon-guard: 보호 목록 읽기 실패(%s) — 자기보호 항목만 남는다" % e, file=sys.stderr)
+    if have_pf and have_inv:
+        try:
+            if os.path.getmtime(inv) > os.path.getmtime(pf):
+                print("canon-guard: 알림 — %s 가 %s 보다 최근이다. "
+                      "'canon-init.sh --protected' 로 보호 목록을 다시 파생하는 것을 권한다."
+                      % (inv, pf), file=sys.stderr)
+        except OSError:
+            pass
+    src = " + ".join(srcs) if srcs else "(없음)"
     out = out + _self_protection()
     if not out:
         print("canon-guard: ⚠보호 목록이 비었다(%s / %s 부재) — 아무것도 막지 못한다. "
@@ -256,7 +276,7 @@ def analyze_bash(cmd, protected=None):
             hit = _raw_scan(joined, protected)
             if hit:
                 return True, ("인터프리터(%s) 인라인 코드에 정본 경로: %s — 정본 읽기는 "
-                              "cat/sed -n 을 쓰고, 쓰기는 master 게이트다" % (base, hit))
+                              "cat/sed -n 을 쓰고, 쓰기는 오케스트레이터 승인 사항다" % (base, hit))
 
     # ④ 셸 탈출 구문 + 정본 문자열 = 보수적 거부
     low = cmd
@@ -295,9 +315,9 @@ def decide(data, protected=None):
         return analyze_bash(ti.get("command") or "", protected)
     return False, "대상 도구 아님"
 
-DENY_MSG = ("정본은 master 게이트다 — 허브 채널로 격상하라. "
+DENY_MSG = ("정본 변경은 오케스트레이터의 승인 사항이다 — 오케스트레이터에게 에스컬레이션하라. "
             "이 파일은 매 세션 자동 주입되고 재부팅을 살아남는다(마인드바이러스 경로). "
-            "하위 노드는 문안만 제안하고, 박제는 master가 canon-edit.sh / canon-resign.sh 로 "
+            "하위 노드는 문안만 제안하고, 확정 반영은 오케스트레이터가 canon-edit.sh / canon-resign.sh 로 "
             "편집+재서명을 한 트랜잭션으로 집행한다. 사유: %s")
 
 def emit_deny(reason):
@@ -411,7 +431,7 @@ def self_test():
         hs = j["hookSpecificOutput"]
         if hs["hookEventName"] != "PreToolUse" or hs["permissionDecision"] != "deny":
             fails.append("deny JSON 필드 오류: %s" % hs)
-        if "허브 채널로 격상" not in hs["permissionDecisionReason"]:
+        if "오케스트레이터에게 에스컬레이션" not in hs["permissionDecisionReason"]:
             fails.append("deny 사유에 격상 안내 없음")
     except Exception as e:
         fails.append("deny JSON 파싱 실패: %s / %s" % (e, buf.getvalue()))

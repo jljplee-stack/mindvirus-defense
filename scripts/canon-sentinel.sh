@@ -20,7 +20,7 @@
 #
 # ★해소 판정(명시):
 #   해소 = 그 경로에 finding이 **하나도 없는** 상태. 도달 경로는 둘뿐이다.
-#     ⑴ master가 canon-resign.sh 로 재서명 → 베이스라인이 현재를 인정
+#     ⑴ 오케스트레이터가 canon-resign.sh 로 재서명 → 베이스라인이 현재를 인정
 #     ⑵ 파일을 원래 내용으로 되돌림 → 해시가 베이스라인과 재일치
 #   그 외(무시·시간 경과·재시작)로는 절대 해소되지 않는다. 해소 시 [해소] 1줄을 push하고
 #   상태를 지운다. 같은 경로에 다른 finding이 남아 있으면 해소로 치지 않는다.
@@ -89,7 +89,7 @@ if [ "${1:-}" = "--run-self-test-impl" ]; then
   n2=$(grep -c '【경고】' "$ALERT_LOG")
   [ "$n2" = "1" ] || { echo "  FAIL ③재발화 억제 실패(경고 ${n2}건)"; fails=$((fails+1)); }
   # ④ 재서명 → 해소 push 1회 + 상태 소거
-  "$CANON_BIN/canon-resign.sh" "$T/docs/CLAUDE.md" --reason "self-test 정당 박제" >/dev/null 2>&1
+  "$CANON_BIN/canon-resign.sh" "$T/docs/CLAUDE.md" --reason "self-test 정당한 변경" >/dev/null 2>&1
   "$0" >/dev/null 2>&1
   n3=$(grep -c '【해소】' "$ALERT_LOG")
   [ "$n3" = "1" ] || { echo "  FAIL ④해소 push 1건이어야(실제 $n3)"; fails=$((fails+1)); }
@@ -152,7 +152,7 @@ notices = [f for _, f in new if f["level"] != "ALERT"]
 if alerts:
     lines.append("【경고】 정본 파일 무단 변경 %d건 — 자동 로드 정본이 서명과 다르다(마인드바이러스 감염 경로)."
                  % len(alerts))
-    lines.append("  판정: 베이스라인 불일치 + 재서명 원장 부재 = 정당 박제가 아니다.")
+    lines.append("  판정: 베이스라인 불일치 + 재서명 원장 부재 = 정당한 변경이 아니다.")
     for f in alerts:
         lines.append("  ─ [%s] %s" % (f["kind"], f["path"]))
         lines.append("      기대(서명) sha256 : %s" % f["expect"])
@@ -174,7 +174,7 @@ if resolved:
         lines.append("  ─ [%s] %s (최초 발화 %s)" % (v["kind"], v["path"], v["first_seen"]))
 if lines:
     lines.append("")
-    lines.append("  해소 방법 = ⑴ master 재서명: canon-resign.sh <파일> --reason \"<근거>\"")
+    lines.append("  해소 방법 = ⑴ 오케스트레이터 재서명: canon-resign.sh <파일> --reason \"<근거>\"")
     lines.append("             ⑵ 원상복구: 파일을 서명 당시 내용으로 되돌린다")
     lines.append("  전체 대조: %s" % os.environ.get("VERIFY", "canon-verify.sh"))
 
@@ -205,7 +205,7 @@ fi
 
 if [ "$DRY" = "1" ]; then
   printf '%s\n' "$BODY"
-  echo "[dry-run] 위 내용이 인박스로 나갔을 것. rc=$RC (상태 미갱신)"
+  echo "[dry-run] 위 내용이 경보 채널로 나갔을 것. rc=$RC (상태 미갱신)"
   exit "$RC"
 fi
 

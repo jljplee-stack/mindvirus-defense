@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# cycle-drill.sh — 픽스처 전 사이클 강제발화. verify → 변조 → ALERT → 재서명 → CLEAN.
+# cycle-drill.sh — 픽스처 전 사이클 실동작 검증. verify → 변조 → ALERT → 재서명 → CLEAN.
 # mindvirus-defense kit · MIT
 #
 # 왜 self-test 와 별도인가: self-test 는 각 스크립트가 **자기 함수**를 검사한다.
@@ -94,16 +94,16 @@ a3=$(grep -c '【경고】' "$CANON_ALERT_LOG")
                 || bad "변조가 진행됐는데 새 경보가 없다(경보 ${a3}건) = 억제기가 과하다"
 
 head_ "★행위자 게이트 — 하위 노드는 재서명으로 경보를 닫을 수 없다"
-CANON_ROLE="worker-9" "$BIN/canon-resign.sh" "$T/docs/CLAUDE.md" --reason "워커가 닫으려는 시도" >/dev/null 2>&1
+CANON_ROLE="worker-9" "$BIN/canon-resign.sh" "$T/docs/CLAUDE.md" --reason "하위 에이전트가 닫으려는 시도" >/dev/null 2>&1
 want 5 $? "role=worker-9 거부(exit 5)"
-CANON_ROLE="reviewer-x" "$BIN/canon-resign.sh" --all --reason "리뷰어 시도" >/dev/null 2>&1
+CANON_ROLE="reviewer-x" "$BIN/canon-resign.sh" --all --reason "검증자 시도" >/dev/null 2>&1
 want 5 $? "role=reviewer-x 거부(exit 5)"
 "$BIN/canon-verify.sh" >/dev/null 2>&1; want 2 $? "거부 후에도 경보 상태 유지(닫히지 않았다)"
 
 head_ "사유 없는 서명은 서명이 아니다"
 "$BIN/canon-resign.sh" "$T/docs/CLAUDE.md" >/dev/null 2>&1; want 4 $? "--reason 누락 거부(exit 4)"
 
-head_ "★해소 ⑴ master 재서명 — 정당 박제로 닫는다"
+head_ "★해소 ⑴ 오케스트레이터 재서명 — 정당한 변경으로 닫는다"
 "$BIN/canon-resign.sh" "$T/docs/CLAUDE.md" --reason "드릴 — 정당 편집으로 인정" >/dev/null 2>&1
 want 0 $? "재서명 성공"
 "$BIN/canon-verify.sh" >/dev/null 2>&1; want 0 $? "verify CLEAN 복귀"
@@ -158,12 +158,53 @@ want 0 $? "작업 파일 Write 통과(과차단 없음)"
 printf '%s' "$(gj Bash command "cat $T/docs/CLAUDE.md")" | bash "$BIN/canon-guard.sh" --explain >/dev/null 2>&1
 want 0 $? "정본 읽기 통과(읽기는 막지 않는다)"
 
+head_ "★낡은 protected.conf 가 인벤토리를 이기지 않는가 (합집합)"
+printf '/nowhere/example/\n' > "$CANON_PROTECTED"       # 일부러 엉뚱한(예시) 목록으로 덮는다
+printf '%s' "$(gj Write file_path "$T/docs/CLAUDE.md")" | bash "$BIN/canon-guard.sh" --explain >/dev/null 2>&1
+want 2 $? "낡은 목록이 있어도 인벤토리 경로는 여전히 차단(합집합)"
+printf '%s' "$(gj Write file_path "/nowhere/example/x.md")" | bash "$BIN/canon-guard.sh" --explain >/dev/null 2>&1
+want 2 $? "손으로 넓힌 항목도 살아 있다(대조군 — 합집합이 한쪽을 버리지 않는다)"
+printf '%s' "$(gj Write file_path "$T/work/notes.md")" | bash "$BIN/canon-guard.sh" --explain >/dev/null 2>&1
+want 0 $? "무관 경로는 여전히 통과(합집합이 전부를 막는 것이 아니다)"
+bash "$BIN/canon-init.sh" --protected >/dev/null 2>&1     # 목록 복구
+
+head_ "★씨앗 상태에서는 보호 목록을 파생하지 않는가 (예시 경로만 지키는 사고 방지)"
+T3="$(mktemp -d)"
+CANON_HOME="$T3" CANON_INVENTORY="$T3/inventory.conf" CANON_PROTECTED="$T3/protected.conf" \
+  bash "$BIN/canon-init.sh" >/dev/null 2>&1
+if [ -f "$T3/inventory.conf" ] && [ ! -f "$T3/protected.conf" ]; then
+  ok "예시 씨앗 상태 = 인벤토리만 생성, 보호 목록은 보류"
+else
+  bad "씨앗 상태에서 보호 목록이 만들어졌다(예시 경로를 지키게 된다)"
+fi
+printf 'strict\t%s\n' "$T/docs/CLAUDE.md" > "$T3/inventory.conf"   # 사이트 경로로 고친 뒤
+CANON_HOME="$T3" CANON_INVENTORY="$T3/inventory.conf" CANON_PROTECTED="$T3/protected.conf" \
+  bash "$BIN/canon-init.sh" --protected >/dev/null 2>&1
+if [ -s "$T3/protected.conf" ]; then ok "인벤토리를 고친 뒤 --protected 로 파생됨(대조군)"
+else bad "--protected 로도 파생되지 않았다"; fi
+rm -rf "$T3"
+
+head_ "★canon-edit 해시가 python 경로로 나오는가 (shasum 의존 제거)"
+export EDITOR="/usr/bin/true"
+"$BIN/canon-edit.sh" "$T/docs/CLAUDE.md" --reason "무편집 확인" >/dev/null 2>&1
+want 0 $? "무편집이면 재서명 없이 종료"
+cat > "$T/work/ed.sh" <<'EDEOF'
+#!/bin/sh
+printf '4. 편집기로 추가한 줄\n' >> "$1"
+EDEOF
+chmod +x "$T/work/ed.sh"
+EDITOR="$T/work/ed.sh" "$BIN/canon-edit.sh" "$T/docs/CLAUDE.md" --reason "드릴 — 편집+재서명 한 명령" >/dev/null 2>&1
+want 0 $? "편집 감지 후 자동 재서명"
+"$BIN/canon-verify.sh" >/dev/null 2>&1; want 0 $? "편집 직후 CLEAN(경보가 뜨지 않는다)"
+grep -q '4. 편집기로 추가한 줄' "$T/docs/CLAUDE.md" && ok "편집 내용이 실제로 반영됨" || bad "편집이 반영되지 않았다"
+unset EDITOR
+
 head_ "★attest 후 부트스트랩 세탁 봉쇄 — 베이스라인을 지워도 다시 못 찍는다"
-"$BIN/canon-resign.sh" --attest --reason "드릴 — master 검토 확인" >/dev/null 2>&1
+"$BIN/canon-resign.sh" --attest --reason "드릴 — 오케스트레이터 검토 확인" >/dev/null 2>&1
 want 0 $? "attest 기록"
 rm -f "$CANON_BASELINE"
 CANON_ROLE="worker-9" "$BIN/canon-resign.sh" --rebuild --reason "세탁 시도" >/dev/null 2>&1
-want 5 $? "베이스라인 삭제 후 워커 재부트스트랩 거부(exit 5)"
+want 5 $? "베이스라인 삭제 후 하위 에이전트 재부트스트랩 거부(exit 5)"
 [ ! -f "$CANON_BASELINE" ] && ok "베이스라인이 다시 찍히지 않았다" || bad "세탁이 성공했다"
 
 head_ "★위 봉쇄가 attest 때문임을 증명 — attest 없는 새 픽스처에서는 허용된다"

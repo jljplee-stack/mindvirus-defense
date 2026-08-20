@@ -94,7 +94,7 @@ bash scripts/canon-verify.sh --json | head -40    # errors 배열을 본다
 EDITOR=vi bash scripts/canon-edit.sh <정본 파일> --reason "<무엇을 왜 바꾸는가>"
 ```
 - 편집 전에 **선행 무결성**을 확인한다. 이미 경보 상태면 **거부(exit 6)** 한다 —
-  그 위에 편집을 얹으면 **무단 변경이 정당 박제로 세탁**되기 때문이다.
+  그 위에 편집을 얹으면 **무단 변경이 정당한 변경으로 세탁**되기 때문이다.
 - 편집 후 실제로 바뀌었으면 즉시 재서명하고 대조까지 한다.
 
 이미 편집해 버렸다면: `canon-resign.sh <파일> --reason "..."`.
