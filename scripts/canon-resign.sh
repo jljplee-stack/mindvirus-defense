@@ -26,6 +26,14 @@ INVENTORY="${CANON_INVENTORY:-$CANON_HOME/inventory.conf}"
 BASELINE="${CANON_BASELINE:-$CANON_HOME/baseline.tsv}"
 LEDGER="${CANON_LEDGER:-$CANON_HOME/resign-ledger.jsonl}"
 
+_py_path() {
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -w "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
+
 PY="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || printf '')"
 [ -n "$PY" ] || { echo "canon-resign: python3 부재 — 중단" >&2; exit 3; }
 
@@ -84,19 +92,40 @@ case "$_gate_exempt" in 1) : ;; *)
 esac
 
 mkdir -p "$CANON_HOME" 2>/dev/null
-export CANON_HOME INVENTORY BASELINE LEDGER CANON_ACTOR_ROLE="${ROLE:-}"
-export CANON_VERIFY="${CANON_VERIFY:-$CANON_BIN/canon-verify.sh}"
+export CANON_HOME="$(_py_path "$CANON_HOME")"
+export INVENTORY="$(_py_path "$INVENTORY")"
+export BASELINE="$(_py_path "$BASELINE")"
+export LEDGER="$(_py_path "$LEDGER")"
+export CANON_ACTOR_ROLE="${ROLE:-}"
+export CANON_VERIFY="$(_py_path "${CANON_VERIFY:-$CANON_BIN/canon-verify.sh}")"
 
 exec "$PY" - "$@" <<'PYEOF'
-import hashlib, json, os, sys, time, glob, tempfile
+import hashlib, json, os, re, sys, time, glob, tempfile
 
-INVENTORY = os.environ["INVENTORY"]
-BASELINE  = os.environ["BASELINE"]
-LEDGER    = os.environ["LEDGER"]
+def _canon(p):
+    p = os.path.expanduser(str(p or "")).replace("\\", "/")
+    if os.name == "nt":
+        if p == "/tmp" or p.startswith("/tmp/"):
+            temp_root = os.environ.get("TEMP") or os.environ.get("TMP")
+            if temp_root:
+                p = temp_root.replace("\\", "/").rstrip("/") + p[4:]
+        m = re.match(r"^/([A-Za-z])(/|$)", p)
+        if m:
+            p = m.group(1).upper() + ":/" + p[3:]
+    if not os.path.isabs(p):
+        p = os.path.abspath(p)
+    p = os.path.normpath(p).replace("\\", "/")
+    if os.name == "nt":
+        p = p.lower()
+    return p
+
+INVENTORY = _canon(os.environ["INVENTORY"])
+BASELINE  = _canon(os.environ["BASELINE"])
+LEDGER    = _canon(os.environ["LEDGER"])
 ACTOR_ROLE = os.environ.get("CANON_ACTOR_ROLE") or "(no-role/human-shell)"
 
 # canon-verify.sh 의 전개·해시 로직을 그대로 재사용한다(SOT 분산 차단).
-sys.path.insert(0, os.path.dirname(os.environ["CANON_VERIFY"]))
+sys.path.insert(0, _canon(os.path.dirname(os.environ["CANON_VERIFY"])))
 
 EXCLUDE_MARKERS = (".bak", ".new", ".user", ".lock")
 
@@ -129,7 +158,7 @@ def read_inventory(path=None):
             tier, sel = parts[0].strip(), parts[1].strip()
             if tier not in ("strict", "append", "watch", "watch-soft"):
                 errors.append("%s:%d 알 수 없는 tier '%s'" % (p, ln, tier)); continue
-            entries.append((tier, os.path.expanduser(sel)))
+            entries.append((tier, _canon(sel)))
     return entries, errors
 
 def expand(entries):
@@ -143,12 +172,12 @@ def expand(entries):
                 for fn in sorted(files):
                     p = os.path.join(root, fn)
                     if fn.endswith(".md") and not excluded(p):
-                        out.setdefault(os.path.abspath(p), tier)
+                        out.setdefault(_canon(p), tier)
         else:
             hits = sorted(glob.glob(sel)) if any(c in sel for c in "*?[") else [sel]
             for p in hits:
                 if os.path.isfile(p) and not excluded(p):
-                    out[os.path.abspath(p)] = tier
+                    out[_canon(p)] = tier
     return out
 
 def read_baseline(path=None):
@@ -218,7 +247,7 @@ def parse_args(argv):
         elif a.startswith("-"):
             return None, None, None, None, None, "알 수 없는 옵션: %s" % a
         else:
-            targets.append(os.path.abspath(os.path.expanduser(a)))
+            targets.append(_canon(a))
         i += 1
     return reason, targets, rebuild, all_diff, attest, None
 

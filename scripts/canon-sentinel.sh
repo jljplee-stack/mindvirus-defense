@@ -39,12 +39,30 @@ ALERT_CMD="${CANON_ALERT_CMD:-}"
 ALERT_LOG="${CANON_ALERT_LOG:-$CANON_HOME/alerts.log}"
 FROM="${CANON_FROM:-canon@sentinel}"
 
+_py_path() {
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -w "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
+
 # 경보 배달 — 본문은 stdin, 등급은 $1. 채널 교체는 CANON_ALERT_CMD 한 변수로만 한다.
 deliver_alert() {
   _lvl="${1:-ALERT}"
   if [ -n "$ALERT_CMD" ]; then
     CANON_ALERT_LEVEL="$_lvl" CANON_ALERT_FROM="$FROM" sh -c "$ALERT_CMD"
   else
+    if [ "${CANON_ALERT_NO_EXTERNAL:-0}" = "1" ]; then
+      {
+        printf '[%s] [%s]\n' "$FROM" "$_lvl"
+        while IFS= read -r _line || [ -n "$_line" ]; do
+          printf '%s\n' "$_line"
+        done
+        printf '\n'
+      } >> "$ALERT_LOG"
+      return 0
+    fi
     mkdir -p "$(dirname "$ALERT_LOG")" 2>/dev/null
     {
       printf '[%s] %s [%s]\n' "$FROM" "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$_lvl"
@@ -64,7 +82,7 @@ if [ -z "$PY" ]; then
     printf '【경고】 canon-sentinel 판정 불가 — python3 를 찾지 못해 무결성 대조가 돌지 않았다.\n'
     printf '  지금 감시는 공백 상태다. 스케줄러 항목에 PATH 를 명시하라.\n'
     printf '  현재 PATH=%s\n' "$PATH"
-  } | deliver_alert BROKEN
+  } | CANON_ALERT_NO_EXTERNAL=1 deliver_alert BROKEN
   echo "canon-sentinel: python3 부재 — 판정 불가(경보 발신함)" >&2
   exit 3
 fi
@@ -127,12 +145,12 @@ if [ "$VRC" = "3" ] || [ -z "$REPORT" ]; then
   rm -f "$MSGF"; exit 3
 fi
 
-export CANON_REPORT="$REPORT" STATE DRY VERIFY
+export CANON_REPORT="$REPORT" STATE_PY="$(_py_path "$STATE")" DRY VERIFY
 OUT="$("$PY" - <<'PYEOF'
 import hashlib, json, os, sys, time
 
 report = json.loads(os.environ["CANON_REPORT"])
-state_path = os.environ["STATE"]
+state_path = os.environ["STATE_PY"]
 
 def fp(f):
     raw = "%s|%s|%s" % (f["kind"], f["path"], f["actual"])
