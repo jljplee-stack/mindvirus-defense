@@ -270,7 +270,9 @@ def _clean_token(token):
 def _command_tokens(cmd, preserve_backslashes=False):
     """POSIX shlex를 기본으로 하되, Windows 경로가 있으면 백슬래시를 보존한다."""
     try:
-        tokens = shlex.split(cmd, posix=not preserve_backslashes)
+        lexer = shlex.shlex(cmd, posix=not preserve_backslashes, punctuation_chars=";|&")
+        lexer.whitespace_split = True
+        tokens = list(lexer)
     except ValueError:
         return []
     return [_clean_token(t) for t in tokens]
@@ -313,8 +315,7 @@ def analyze_bash(cmd, protected=None):
         # shlex(posix=True)는 C:\\...의 백슬래시를 이스케이프 문자로 먹는다.
         # Windows 경로가 보이는 경우에만 비-POSIX 토큰화를 사용해 기존 POSIX 결과를 보존한다.
         windows_path = bool(":\\" in cmd or "\\\\" in cmd)
-        tokens = shlex.split(cmd, posix=not windows_path)
-        tokens = [_clean_token(t) for t in tokens]
+        tokens = _command_tokens(cmd, preserve_backslashes=windows_path)
     except ValueError:
         # 따옴표 불균형 등 — 파싱 불가. 정본 문자열이 보이면 fail-closed.
         hit = _raw_scan(cmd, protected)
@@ -727,6 +728,21 @@ def self_test():
     chk("S2 PS 작업 파일",       PW("& { Set-Content C:/Users/이상윤/cys-work/notes.md -Value x }"), False)
     chk("S3 Bash read→other",    B('eval "grep x %s > /c/Users/이상윤/cys-work/out.txt"' % WIN), False)
 
+    # ── 구분자 토큰화 T군: 공백 없는 연결도 세그먼트별로 차단 ──
+    chk("T1 세미콜론 touch",     B("echo x;touch %s/soul.md;echo y" % G), True)
+    chk("T2 세미콜론 rm",        B("echo x;rm %s/soul.md" % G), True)
+    chk("T3 붙은 pipe",          B("touch %s/soul.md|cat" % G), True)
+    chk("T4 붙은 &&",            B("touch %s/soul.md&&echo x" % G), True)
+    chk("T5 세미콜론 cp",        B("echo x;cp evil %s/soul.md" % G), True)
+    chk("T6 PS 세미콜론",        PW("echo hi; Set-Content -Path %s/soul.md -Value x" % G), True)
+    chk("T7 PS 세미콜론 ri",     PW("dir; ri %s/soul.md" % G), True)
+
+    # ── 구분자 토큰화 U군: 연결된 읽기/무관 쓰기는 통과 ──
+    chk("U1 세미콜론 cat",        B("echo x;cat %s/CLAUDE.md" % G), False)
+    chk("U2 세미콜론 무관 touch", B("echo x;touch /tmp/other.txt"), False)
+    chk("U3 붙은 read→other",     B("grep x %s/CLAUDE.md>>/tmp/out.txt" % G), False)
+    chk("U4 PS 세미콜론 읽기",    PW("echo x;Get-Content %s/CLAUDE.md" % G), False)
+
     # ── 통과해야 하는 것(과차단 방지) ──
     chk("A1 정본 읽기 cat",       B("cat %s/CLAUDE.md" % G), False)
     chk("A2 정본 읽기 sed -n",    B("sed -n '1,50p' %s/directives/AGENT_DIRECTIVE.md" % G), False)
@@ -767,12 +783,14 @@ def self_test():
     print("self-test evidence Q: %s" % evidence("Q"))
     print("self-test evidence R: %s" % evidence("R"))
     print("self-test evidence S: %s" % evidence("S"))
+    print("self-test evidence T: %s" % evidence("T"))
+    print("self-test evidence U: %s" % evidence("U"))
     case_count = len(results) + 1
     if fails:
         print("\n".join("  FAIL " + f for f in fails), file=sys.stderr)
         print("self-test: %d 실패 / %d 케이스" % (len(fails), case_count), file=sys.stderr)
         return 1
-    print("self-test OK — %d 케이스(신규 P11·Q6·R6·S3 포함)" % case_count)
+    print("self-test OK — %d 케이스(신규 T7·U4 포함)" % case_count)
     return 0
 
 if os.environ.get("CANON_GUARD_SELF_TEST"):
