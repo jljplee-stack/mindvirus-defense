@@ -41,6 +41,14 @@ CANON_BIN="${CANON_BIN:-$(cd "$(dirname "$0")" 2>/dev/null && pwd)}"
 CANON_PROTECTED="${CANON_PROTECTED:-$CANON_HOME/protected.conf}"
 CANON_INVENTORY="${CANON_INVENTORY:-$CANON_HOME/inventory.conf}"
 
+_py_path() {
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -w "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
+
 if [ -z "$PY" ]; then
   # python 부재 — 정밀 분석 불가. 보호 경로 문자열이 입력에 **보이기만 해도** 거부한다
   # (canon 한정 fail-closed · 무관 작업은 통과시켜 과차단을 피한다).
@@ -61,12 +69,32 @@ fi
 
 INPUT="$(cat 2>/dev/null)"
 export CANON_GUARD_INPUT="$INPUT"
-export CANON_GUARD_HOME="$HOME"
-export CANON_HOME CANON_BIN CANON_PROTECTED CANON_INVENTORY
+export CANON_GUARD_HOME="$(_py_path "$HOME")"
+export CANON_HOME="$(_py_path "$CANON_HOME")"
+export CANON_BIN="$(_py_path "$CANON_BIN")"
+export CANON_PROTECTED="$(_py_path "$CANON_PROTECTED")"
+export CANON_INVENTORY="$(_py_path "$CANON_INVENTORY")"
 exec "$PY" - "$@" <<'PYEOF'
 import json, os, re, shlex, sys
 
-HOME = os.environ.get("CANON_GUARD_HOME") or os.path.expanduser("~")
+def _canon(p):
+    p = os.path.expanduser(str(p or "")).replace("\\", "/")
+    if os.name == "nt":
+        if p == "/tmp" or p.startswith("/tmp/"):
+            temp_root = os.environ.get("TEMP") or os.environ.get("TMP")
+            if temp_root:
+                p = temp_root.replace("\\", "/").rstrip("/") + p[4:]
+        m = re.match(r"^/([A-Za-z])(/|$)", p)
+        if m:
+            p = m.group(1).upper() + ":/" + p[3:]
+    if not os.path.isabs(p):
+        p = os.path.abspath(p)
+    p = os.path.normpath(p).replace("\\", "/")
+    if os.name == "nt":
+        p = p.lower()
+    return p
+
+HOME = _canon(os.environ.get("CANON_GUARD_HOME") or os.path.expanduser("~"))
 
 # ── 보호 경로 ────────────────────────────────────────────────────────
 # ★층 ②(inventory.conf)보다 의도적으로 **넓다**. 이유: ②는 탐지라 정밀해야 소음이 안 나고,
@@ -90,7 +118,7 @@ def _self_protection():
     for key in ("CANON_HOME", "CANON_BIN"):
         v = os.environ.get(key)
         if v:
-            out.append(os.path.normpath(os.path.expanduser(v)) + "/")
+            out.append(_canon(v) + "/")
     return out
 
 def _from_file(path):
@@ -99,7 +127,8 @@ def _from_file(path):
         for line in fh:
             line = line.split("#", 1)[0].strip()
             if line:
-                out.append(os.path.expanduser(line))
+                is_dir = line.replace("\\", "/").endswith("/")
+                out.append(_canon(line.rstrip("/\\")) + ("/" if is_dir else ""))
     return out
 
 def _from_inventory(path):
@@ -113,13 +142,13 @@ def _from_inventory(path):
             parts = [x for x in line.split("\t") if x != ""]
             if len(parts) < 2:
                 continue
-            tier, sel = parts[0].strip(), os.path.expanduser(parts[1].strip())
+            tier, sel = parts[0].strip(), _canon(parts[1].strip())
             if tier in ("watch", "watch-soft"):
-                out.append(os.path.normpath(sel) + "/")
+                out.append(_canon(sel) + "/")
             elif any(c in sel for c in "*?["):
-                out.append(os.path.normpath(os.path.dirname(sel)) + "/")
+                out.append(_canon(os.path.dirname(sel)) + "/")
             else:
-                out.append(sel)
+                out.append(_canon(sel))
     return out
 
 _PROT_CACHE = None
@@ -129,8 +158,8 @@ def protected_list():
     if _PROT_CACHE is not None:
         return _PROT_CACHE
     out, srcs = [], []
-    pf = os.environ.get("CANON_PROTECTED")
-    inv = os.environ.get("CANON_INVENTORY")
+    pf = _canon(os.environ.get("CANON_PROTECTED")) if os.environ.get("CANON_PROTECTED") else None
+    inv = _canon(os.environ.get("CANON_INVENTORY")) if os.environ.get("CANON_INVENTORY") else None
     have_pf = bool(pf and os.path.isfile(pf))
     have_inv = bool(inv and os.path.isfile(inv))
     try:
@@ -159,12 +188,7 @@ def protected_list():
     return _PROT_CACHE
 
 def norm(p):
-    p = os.path.expanduser(str(p or "")).replace("\\", "/")
-    if p.startswith("~"):
-        p = os.path.expanduser(p)
-    if not os.path.isabs(p):
-        p = os.path.abspath(p)
-    return os.path.normpath(p)
+    return _canon(p)
 
 def is_canon(path, protected=None):
     if not path:
@@ -173,10 +197,11 @@ def is_canon(path, protected=None):
     n = norm(path)
     for p in prot:
         if p.endswith("/"):
-            if n == os.path.normpath(p) or n.startswith(os.path.normpath(p) + "/"):
+            base = _canon(p[:-1])
+            if n == base or n.startswith(base + "/"):
                 return p
         else:
-            if n == os.path.normpath(p):
+            if n == _canon(p):
                 return p
     return None
 
@@ -238,6 +263,36 @@ def _redirect_targets(tokens):
         i += 1
     return out
 
+def _clean_token(token):
+    """PowerShell/Windows 토큰의 인용부호와 끝 구두점을 경로 비교 전에 제거한다."""
+    return str(token or "").strip().strip("'\"").rstrip(",)]}")
+
+def _command_tokens(cmd, preserve_backslashes=False):
+    """POSIX shlex를 기본으로 하되, Windows 경로가 있으면 백슬래시를 보존한다."""
+    try:
+        tokens = shlex.split(cmd, posix=not preserve_backslashes)
+    except ValueError:
+        return []
+    return [_clean_token(t) for t in tokens]
+
+def _path_hits(text, protected=None):
+    """문자열 안의 토큰/인용 문자열을 _canon() 경유로 정본과 대조한다."""
+    prot = protected if protected is not None else protected_list()
+    raw = str(text or "")
+    candidates = _command_tokens(raw, preserve_backslashes=True)
+    candidates += re.findall(r"['\"]([^'\"]+)['\"]", raw)
+    for candidate in candidates:
+        candidate = _clean_token(candidate)
+        hit = is_canon(candidate, prot)
+        if hit:
+            return hit, candidate
+        if "=" in candidate and candidate.split("=", 1)[0].startswith("-"):
+            value = candidate.split("=", 1)[1]
+            hit = is_canon(value, prot)
+            if hit:
+                return hit, value
+    return None, None
+
 def _segments(tokens):
     """; && || | 로 끊어 명령 단위로."""
     seg, cur = [], []
@@ -255,7 +310,11 @@ def analyze_bash(cmd, protected=None):
     if not cmd or not cmd.strip():
         return False, "empty"
     try:
-        tokens = shlex.split(cmd, posix=True)
+        # shlex(posix=True)는 C:\\...의 백슬래시를 이스케이프 문자로 먹는다.
+        # Windows 경로가 보이는 경우에만 비-POSIX 토큰화를 사용해 기존 POSIX 결과를 보존한다.
+        windows_path = bool(":\\" in cmd or "\\\\" in cmd)
+        tokens = shlex.split(cmd, posix=not windows_path)
+        tokens = [_clean_token(t) for t in tokens]
     except ValueError:
         # 따옴표 불균형 등 — 파싱 불가. 정본 문자열이 보이면 fail-closed.
         hit = _raw_scan(cmd, protected)
@@ -316,20 +375,193 @@ def analyze_bash(cmd, protected=None):
                 return True, ("인터프리터(%s) 인라인 코드에 정본 경로: %s — 정본 읽기는 "
                               "cat/sed -n 을 쓰고, 쓰기는 오케스트레이터 승인 사항다" % (base, hit))
 
-    # ④ 셸 탈출 구문 + 정본 문자열 = 보수적 거부
+    # ④ 셸 탈출 구문 + 정본 쓰기 대상 = 보수적 거부
     low = cmd
     if any(e in low for e in ESCAPES):
-        hit = _raw_scan(cmd, protected)
+        hit = _escape_write_hit(cmd, protected)
         if hit:
             return True, "셸 탈출 구문(bash -c/eval/$()/backtick/xargs) + 정본 경로: %s" % hit
     return False, "정본 쓰기 아님"
 
-def _raw_scan(text, protected=None):
+
+# ── PowerShell 명령의 예방층 분석 ─────────────────────────────────────
+# PowerShell은 별칭과 매개변수 표기가 넓으므로 전면 파싱하지 않는다.
+PWSH_READ_CMDS = {
+    "get-content", "gc", "cat", "type", "select-string", "sls", "test-path",
+    "get-item", "gi", "get-childitem", "gci", "ls", "dir",
+}
+PWSH_WRITE_CMDS = {
+    "set-content", "sc", "add-content", "ac", "clear-content", "clc",
+    "out-file", "tee-object", "tee", "new-item", "ni", "remove-item", "ri",
+    "del", "erase", "rd", "rmdir", "rm", "rename-item", "ren", "rni",
+    "move-item", "mi", "move", "mov", "mv", "copy-item", "cpi", "ci", "copy", "cp",
+    "set-itemproperty", "sp", "icacls",
+}
+PWSH_PATH_OPTIONS = {"-path", "-literalpath", "-filepath", "-destination", "-target"}
+
+def _pwsh_base(segment):
+    if not segment:
+        return ""
+    base = _clean_token(segment[0]).lower()
+    if base == "&" and len(segment) > 1:
+        base = _clean_token(segment[1]).lower()
+    base = os.path.basename(base)
+    return base[:-4] if base.endswith(".exe") else base
+
+def _pwsh_option_values(args, options):
+    out = []
+    i = 0
+    while i < len(args):
+        arg = _clean_token(args[i])
+        low = arg.lower()
+        for option in options:
+            if low == option and i + 1 < len(args):
+                out.append(_clean_token(args[i + 1])); i += 1; break
+            if low.startswith(option + "="):
+                out.append(_clean_token(arg[len(option) + 1:])); break
+        i += 1
+    return out
+
+def _pwsh_positional(args):
+    return [a for a in args if a and not a.startswith("-") and a not in (";", "|", "&&", "||", "&")]
+
+def analyze_powershell(cmd, protected=None, allow_escape=True):
+    """PowerShell 예방층: 정본 쓰기 대상만 차단하고 읽기→비정본 쓰기는 통과한다."""
+    if not cmd or not cmd.strip():
+        return False, "empty"
     prot = protected if protected is not None else protected_list()
-    for p in prot:
-        key = p[:-1] if p.endswith("/") else p
-        if key in text:
-            return key
+    windows_path = bool(re.search(r"(?:[A-Za-z]:[\\/]|/)", cmd))
+    tokens = _command_tokens(cmd, preserve_backslashes=windows_path)
+    if not tokens:
+        tokens = [_clean_token(x) for x in re.split(r"\s+", cmd.strip())]
+
+    for target in _redirect_targets(tokens):
+        hit = is_canon(_clean_token(target), prot)
+        if hit:
+            return True, "PowerShell 리다이렉션 대상이 정본: %s (규칙 %s)" % (target, hit)
+
+    for raw_seg in _segments(tokens):
+        if not raw_seg:
+            continue
+        base = _pwsh_base(raw_seg)
+        args = raw_seg[1:] if not (raw_seg and raw_seg[0] == "&") else raw_seg[2:]
+        low_seg = " ".join(raw_seg).lower()
+
+        # [IO.File]::WriteAllText/WriteAllLines/AppendAllText/Delete 계열.
+        if re.search(r"(?:\[\s*(?:system\.)?io\.file\s*\]|(?:system\.)?io\.file)\s*::\s*"
+                     r"(?:writealltext|writealllines|appendalltext|delete)\b", low_seg, re.I):
+            quoted = re.findall(r"['\"]([^'\"]+)['\"]", " ".join(raw_seg))
+            for value in quoted:
+                hit = is_canon(value, prot)
+                if hit:
+                    return True, "PowerShell IO.File 쓰기 대상이 정본: %s (규칙 %s)" % (value, hit)
+
+        if base not in PWSH_WRITE_CMDS:
+            continue
+
+        if base in ("copy-item", "cpi", "ci", "copy", "cp", "move-item", "mi", "move", "mov", "mv"):
+            named_dest = _pwsh_option_values(args, {"-destination", "-d"})
+            positional = _pwsh_positional(args)
+            destinations = named_dest or (positional[1:2] if len(positional) > 1 else [])
+            for value in destinations:
+                hit = is_canon(value, prot)
+                if hit:
+                    return True, "PowerShell %s 목적지가 정본: %s (규칙 %s)" % (base, value, hit)
+            continue
+
+        targets = _pwsh_option_values(args, PWSH_PATH_OPTIONS)
+        if not targets:
+            targets = _pwsh_positional(args)
+        for value in targets:
+            hit = is_canon(value, prot)
+            if hit:
+                return True, "PowerShell %s 쓰기 대상이 정본: %s (규칙 %s)" % (base, value, hit)
+
+    if allow_escape and _has_powershell_escape(cmd):
+        hit = _escape_write_hit(
+            cmd, prot,
+            nested_analyzer=lambda inner, p: analyze_powershell(inner, p, allow_escape=False),
+        )
+        if hit:
+            return True, "PowerShell 탈출 구문 + 정본 쓰기: %s" % hit
+    return False, "정본 쓰기 아님"
+
+def _raw_path_candidates(text):
+    """원문 속 POSIX/Windows 절대경로 후보를 뽑는다(경로 비교는 _canon에 위임)."""
+    raw = str(text or "")
+    # 따옴표 안의 명령 전체도 훑되, 아래의 절대경로 정규식으로 실제 경로만 다시 추린다.
+    chunks = [raw] + re.findall(r"['\"]([^'\"]+)['\"]", raw)
+    pattern = re.compile(r"(?:[A-Za-z]:[\\/]|/[A-Za-z](?:[\\/])|/)[^\s'\"`;&|<>(),]+")
+    for chunk in chunks:
+        for match in pattern.finditer(chunk):
+            candidate = match.group(0).rstrip(".])}")
+            if candidate:
+                yield candidate
+
+def _raw_scan(text, protected=None):
+    """표기(C:/, c:/, /c/)가 달라도 _canon() 결과로 정본을 찾는다."""
+    prot = protected if protected is not None else protected_list()
+    for candidate in _raw_path_candidates(text):
+        hit = is_canon(candidate, prot)
+        if hit:
+            return hit[:-1] if hit.endswith("/") else hit
+    return None
+
+def _has_powershell_escape(text):
+    low = str(text or "").lower()
+    if re.search(r"(?<![\w-])(?:iex|invoke-expression|invoke-command|start-process|powershell|pwsh)(?![\w-])", low):
+        return True
+    if re.search(r"(?<![\w-])-(?:encodedcommand|command)(?![\w-])", low):
+        return True
+    if re.search(r"(?m)^\s*&\s*(?:\{|['\"])", text) or re.search(r"(?m)^\s*\.\s*\{", text):
+        return True
+    if re.search(r"&\s*\{", text):
+        return True
+    return False
+
+def _raw_redirect_scan(text, protected=None):
+    prot = protected if protected is not None else protected_list()
+    for match in re.finditer(r">+\|?\s*['\"]?([^'\"\s;&|<>(),]+)", str(text or "")):
+        candidate = match.group(1).rstrip(".])}")
+        hit = is_canon(candidate, prot)
+        if hit:
+            return hit[:-1] if hit.endswith("/") else hit
+    return None
+
+def _has_write_marker(text):
+    low = str(text or "").lower()
+    words = (
+        "set-content", "sc", "add-content", "ac", "clear-content", "clc",
+        "out-file", "tee-object", "tee", "new-item", "ni", "remove-item", "ri",
+        "del", "erase", "rd", "rmdir", "rm", "rename-item", "ren", "rni",
+        "move-item", "mi", "move", "mov", "mv", "copy-item", "cpi", "ci",
+        "copy", "cp", "set-itemproperty", "sp", "icacls", "truncate", "chmod",
+        "chown", "chflags", "unlink", "shred", "touch",
+    )
+    if any(re.search(r"(?<![\w-])%s(?![\w-])" % re.escape(word), low) for word in words):
+        return True
+    if re.search(r"\b(?:sed|gsed|perl|ruby)\b[^\n;|]*?(?:-i\b|--in-place\b)", low):
+        return True
+    if re.search(r"\b(?:dd\b[^\n;|]*\bof=|open\s*\([^\n]*['\"][wa])", low):
+        return True
+    return False
+
+def _escape_write_hit(text, protected=None, nested_analyzer=None):
+    """탈출 토큰은 정본 쓰기 대상일 때만 차단한다."""
+    raw = str(text or "")
+    prot = protected if protected is not None else protected_list()
+    if nested_analyzer:
+        nested = re.findall(r"['\"]([^'\"]+)['\"]", raw)
+        nested += re.findall(r"\{([^{}]+)\}", raw, re.S)
+        for inner in nested:
+            blocked, reason = nested_analyzer(inner, prot)
+            if blocked:
+                return reason
+    hit = _raw_redirect_scan(raw, prot)
+    if hit:
+        return hit
+    if _has_write_marker(raw) or re.search(r"(?i)-encodedcommand\b", raw):
+        return _raw_scan(raw, prot)
     return None
 
 # ── 훅 본체 ──────────────────────────────────────────────────────────
@@ -351,6 +583,8 @@ def decide(data, protected=None):
         return False, "정본 아님"
     if tool == "Bash":
         return analyze_bash(ti.get("command") or "", protected)
+    if tool == "PowerShell":
+        return analyze_powershell(ti.get("command") or "", protected)
     return False, "대상 도구 아님"
 
 DENY_MSG = ("정본 변경은 오케스트레이터의 승인 사항이다 — 오케스트레이터에게 에스컬레이션하라. "
@@ -405,14 +639,21 @@ def self_test():
         G + "/settings.json",
         G + "/bin/",
     ]
+    WIN = r"C:\Users\이상윤\.cys\pack\soul.md"
+    MSYS = r"/c/Users/이상윤/.cys/pack/soul.md"
+    P.append(WIN)
+    P.append(MSYS)
     fails = []
+    results = {}
     def chk(name, data, want):
         got, why = decide(data, P)
+        results[name.split(" ", 1)[0]] = got
         if got != want:
             fails.append("%s: 기대 block=%s 실제 %s (%s)" % (name, want, got, why))
     W = lambda p: {"tool_name": "Write", "tool_input": {"file_path": p}}
     E = lambda p: {"tool_name": "Edit",  "tool_input": {"file_path": p}}
     B = lambda c: {"tool_name": "Bash",  "tool_input": {"command": c}}
+    PW = lambda c: {"tool_name": "PowerShell", "tool_input": {"command": c}}
 
     # ── 차단되어야 하는 것 ──
     chk("W1 정본 Write",         W(G + "/CLAUDE.md"), True)
@@ -452,6 +693,40 @@ def self_test():
     chk("B22 sed 긴 옵션",         B("sed --in-place s/a/b/ %s/CLAUDE.md" % G), True)
     chk("B23 접두+래퍼 중첩",      B("LANG=C /usr/bin/env FOO=1 tee -a %s/soul.md" % G), True)
 
+    # ── PowerShell P군: 정본 쓰기 대상은 모두 차단 ──
+    chk("P1 Set-Content -Path", PW("Set-Content -Path %s/soul.md -Value x" % G), True)
+    chk("P2 sc 별칭",           PW("sc %s/soul.md x" % G), True)
+    chk("P3 Out-File -FilePath",PW("Out-File -FilePath %s/soul.md" % G), True)
+    chk("P4 PowerShell >",      PW('"x" > %s/soul.md' % G), True)
+    chk("P5 Remove-Item",       PW("Remove-Item %s/soul.md" % G), True)
+    chk("P6 ri 별칭",           PW("ri %s/soul.md" % G), True)
+    chk("P7 del 별칭",          PW("del %s/soul.md" % G), True)
+    chk("P8 New-Item -Force",   PW("New-Item -Force -Path %s/soul.md" % G), True)
+    chk("P9 Copy-Item 목적지",  PW("Copy-Item evil.md -Destination %s/soul.md" % G), True)
+    chk("P10 IO.File",          PW(r'[IO.File]::WriteAllText("%s/soul.md","x")' % G), True)
+    chk("P11 Bash 백슬래시",     B(r"rm C:\Users\이상윤\.cys\pack\soul.md"), True)
+
+    # ── PowerShell Q군: 음성 대조군은 모두 통과 ──
+    chk("Q1 Get-Content",        PW("Get-Content %s/CLAUDE.md" % G), False)
+    chk("Q2 Select-String",      PW("Select-String x %s/CLAUDE.md" % G), False)
+    chk("Q3 read | Out-File",    PW("Get-Content %s/CLAUDE.md | Out-File %s/out.txt" % (G, WK)), False)
+    chk("Q4 작업 Set-Content",   PW("Set-Content %s/notes.md -Value x" % WK), False)
+    chk("Q5 작업 Remove-Item",   PW("Remove-Item %s/scratch -Recurse" % WK), False)
+    chk("Q6 Copy-Item 소스",     PW("Copy-Item %s/CLAUDE.md %s/backup.md" % (G, WK)), False)
+
+    # ── 탈출 구문 R군: 실행-은닉 뒤의 정본 쓰기도 차단 ──
+    chk("R1 PS 선두 &",          PW("& { Set-Content -Path '%s/soul.md' -Value evil }" % G), True)
+    chk("R2 iex",                PW("iex \"Set-Content -Path '%s/soul.md' -Value evil\"" % G), True)
+    chk("R3 Invoke-Command",     PW("Invoke-Command -ScriptBlock { Set-Content -Path '%s/soul.md' -Value evil }" % G), True)
+    chk("R4 Start-Process",      PW("Start-Process powershell -ArgumentList \"Set-Content -Path '%s/soul.md' -Value evil\"" % G), True)
+    chk("R5 Bash eval Windows",  B('eval "echo evil > %s"' % WIN), True)
+    chk("R6 Bash sh msys",       B('sh -c "echo evil > %s"' % MSYS), True)
+
+    # ── 탈출 구문 S군: 읽기 또는 작업 파일 쓰기는 통과 ──
+    chk("S1 iex 읽기",           PW("iex \"Get-Content %s/CLAUDE.md\"" % G), False)
+    chk("S2 PS 작업 파일",       PW("& { Set-Content C:/Users/이상윤/cys-work/notes.md -Value x }"), False)
+    chk("S3 Bash read→other",    B('eval "grep x %s > /c/Users/이상윤/cys-work/out.txt"' % WIN), False)
+
     # ── 통과해야 하는 것(과차단 방지) ──
     chk("A1 정본 읽기 cat",       B("cat %s/CLAUDE.md" % G), False)
     chk("A2 정본 읽기 sed -n",    B("sed -n '1,50p' %s/directives/AGENT_DIRECTIVE.md" % G), False)
@@ -485,11 +760,19 @@ def self_test():
     except Exception as e:
         fails.append("deny JSON 파싱 실패: %s / %s" % (e, buf.getvalue()))
 
+    def evidence(prefix):
+        return " ".join("%s=%s" % (k, results[k]) for k in results if k.startswith(prefix))
+    print("self-test evidence P: %s" % evidence("P"))
+    print("self-test evidence A: %s" % evidence("A"))
+    print("self-test evidence Q: %s" % evidence("Q"))
+    print("self-test evidence R: %s" % evidence("R"))
+    print("self-test evidence S: %s" % evidence("S"))
+    case_count = len(results) + 1
     if fails:
         print("\n".join("  FAIL " + f for f in fails), file=sys.stderr)
-        print("self-test: %d 실패 / 51 케이스" % len(fails), file=sys.stderr)
+        print("self-test: %d 실패 / %d 케이스" % (len(fails), case_count), file=sys.stderr)
         return 1
-    print("self-test OK — 51 케이스(차단 33·통과 17·deny JSON 계약 1)")
+    print("self-test OK — %d 케이스(신규 P11·Q6·R6·S3 포함)" % case_count)
     return 0
 
 if os.environ.get("CANON_GUARD_SELF_TEST"):

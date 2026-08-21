@@ -24,6 +24,11 @@ mindvirus-defense kit · MIT
 | `env tee <정본>` · `command tee <정본>` · `nice -n 5 rm <정본>` (래퍼) | **차단** ✅ |
 | `sed --in-place … <정본>` (긴 옵션 표기) | **차단** ✅ |
 | **알려지지 않은 래퍼 뒤의 쓰기** (`myrunner tee <정본>` 등) | 통과 ⚠ |
+| PowerShell 실행-은닉(`iex`·`Invoke-Command`·`Start-Process`·선두 `&`) + 평문 정본 쓰기 | **차단** ✅ (단, 문자열 예방층) |
+| PowerShell G1 상대경로 (`cd <정본 디렉터리>; Set-Content soul.md`) | 통과 ⚠ — `cd`/cwd 해석 한계. 실제 쓰기가 일어나면 **층 ② 해시 워치가 최종 그물**로 sha256을 잡는다 |
+| PowerShell G2 변수·식 경로 (`$env:USERPROFILE`·`$HOME`·괄호식) | 통과 ⚠ — 변수 확장 없음. 실제 쓰기가 일어나면 **층 ② 해시 워치가 최종 그물**로 sha256을 잡는다 |
+| PowerShell G3 UNC·8.3 표기 (`\\?\C:\...`·`\\localhost\c$\...`·`LEESAN~1`) | 통과 ⚠ — 파일시스템 별칭 해석 없음. 실제 쓰기가 일어나면 **층 ② 해시 워치가 최종 그물**로 sha256을 잡는다 |
+| PowerShell `-EncodedCommand` 본문 | 통과 ⚠ — 토큰은 식별하지만 base64 본문은 디코드하지 않는다. 실제 쓰기가 일어나면 **층 ② 해시 워치가 최종 그물**로 sha256을 잡는다 |
 
 ★아래 3종은 **공개 전 적대 검토에서 통과가 확인됐다가 그 라운드에서 막은 것**이다
 (`evidence/review-round.md` R2-② → R3-①). 원인은 하나였다 — 분석기가 **세그먼트의 첫 토큰을
@@ -164,6 +169,6 @@ mindvirus-defense kit · MIT
 ## 11. 이 킷이 검증하지 않은 것
 
 - **다중 기계·다중 계정 환경**에서의 동작(단일 사용자 홈 디렉터리 기준으로 만들었다)
-- **Windows**(WSL 밖) — POSIX 셸을 전제한다
+- **Windows**(WSL 밖) — Bash 분석은 POSIX 셸 구문을 전제로 하고, PowerShell 도구는 별도 문자열 예방 분기에서 정본 쓰기를 판정한다. PowerShell의 상대경로·변수/식·UNC/8.3·`-EncodedCommand` 본문은 위 표의 구조적 한계로 남는다.
 - **대규모 인벤토리**(수천 파일) 에서의 성능 — 참조 실측은 156파일 0.7MB에 60ms/회다
 - 층 ①(발신 원장)과 ⑤(면역 문단)의 실행 코드 — 이 킷에는 **없다**(설계 지침만)

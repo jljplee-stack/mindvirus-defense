@@ -23,19 +23,47 @@ INVENTORY="${CANON_INVENTORY:-$CANON_HOME/inventory.conf}"
 BASELINE="${CANON_BASELINE:-$CANON_HOME/baseline.tsv}"
 LEDGER="${CANON_LEDGER:-$CANON_HOME/resign-ledger.jsonl}"
 
+_py_path() {
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -w "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
+
 PY="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || printf '')"
 if [ -z "$PY" ]; then
   echo "canon-verify: python3 부재 — 판정 불가(fail-loud)" >&2
   exit 3
 fi
 
-export CANON_HOME INVENTORY BASELINE LEDGER
+export CANON_HOME="$(_py_path "$CANON_HOME")"
+export INVENTORY="$(_py_path "$INVENTORY")"
+export BASELINE="$(_py_path "$BASELINE")"
+export LEDGER="$(_py_path "$LEDGER")"
 exec "$PY" - "$@" <<'PYEOF'
-import hashlib, json, os, sys, glob, time
+import hashlib, json, os, re, sys, glob, time
 
-INVENTORY = os.environ["INVENTORY"]
-BASELINE  = os.environ["BASELINE"]
-LEDGER    = os.environ["LEDGER"]
+def _canon(p):
+    p = os.path.expanduser(str(p or "")).replace("\\", "/")
+    if os.name == "nt":
+        if p == "/tmp" or p.startswith("/tmp/"):
+            temp_root = os.environ.get("TEMP") or os.environ.get("TMP")
+            if temp_root:
+                p = temp_root.replace("\\", "/").rstrip("/") + p[4:]
+        m = re.match(r"^/([A-Za-z])(/|$)", p)
+        if m:
+            p = m.group(1).upper() + ":/" + p[3:]
+    if not os.path.isabs(p):
+        p = os.path.abspath(p)
+    p = os.path.normpath(p).replace("\\", "/")
+    if os.name == "nt":
+        p = p.lower()
+    return p
+
+INVENTORY = _canon(os.environ["INVENTORY"])
+BASELINE  = _canon(os.environ["BASELINE"])
+LEDGER    = _canon(os.environ["LEDGER"])
 
 EXCLUDE_MARKERS = (".bak", ".new", ".user", ".lock", ".promote.lock", "~", ".DS_Store")
 
@@ -87,7 +115,7 @@ def read_inventory():
             if tier not in ("strict", "append", "watch", "watch-soft"):
                 errors.append("%s:%d 알 수 없는 tier '%s'" % (INVENTORY, ln, tier))
                 continue
-            entries.append((tier, os.path.expanduser(selector)))
+            entries.append((tier, _canon(selector)))
     return entries, errors
 
 def expand(entries):
@@ -103,13 +131,13 @@ def expand(entries):
                     p = os.path.join(root, fn)
                     if not fn.endswith(".md") or excluded(p):
                         continue
-                    out.setdefault(os.path.abspath(p), tier)
+                    out.setdefault(_canon(p), tier)
         else:
             hits = sorted(glob.glob(sel)) if any(c in sel for c in "*?[") else [sel]
             for p in hits:
                 if not os.path.isfile(p) or excluded(p):
                     continue
-                out[os.path.abspath(p)] = tier      # 명시 지정은 watch 상속을 덮는다
+                out[_canon(p)] = tier      # 명시 지정은 watch 상속을 덮는다
     return out
 
 def read_baseline():
@@ -327,14 +355,14 @@ def self_test():
         # ⑤ watch 새 파일 → NOTICE/ADDED
         m2 = os.path.join(memd, "c.md"); open(m2, "w").write("new memory\n")
         fnd, _, _, _ = verify()
-        if not any(f["kind"] == "ADDED" and f["level"] == "NOTICE" and f["path"] == m2 for f in fnd):
+        if not any(f["kind"] == "ADDED" and f["level"] == "NOTICE" and f["path"] == _canon(m2) for f in fnd):
             fails.append("⑤watch 새 파일이 NOTICE/ADDED로 안 잡힘: %s" % fnd)
         sign()
 
         # ⑥ watch 기존 파일 수정 → ALERT/MODIFIED
         open(m1, "w").write("body a TAMPERED\n")
         fnd, _, _, _ = verify()
-        if not any(f["kind"] == "MODIFIED" and f["level"] == "ALERT" and f["path"] == m1 for f in fnd):
+        if not any(f["kind"] == "MODIFIED" and f["level"] == "ALERT" and f["path"] == _canon(m1) for f in fnd):
             fails.append("⑥watch 기존 파일 수정이 ALERT로 안 잡힘: %s" % fnd)
         sign()
 

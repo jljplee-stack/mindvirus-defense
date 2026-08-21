@@ -26,7 +26,7 @@ export SETTINGS HOOK_CMD MODE
 "$PY" - <<'PYEOF'
 import json, os, shutil, sys, time
 S = os.environ["SETTINGS"]; CMD = os.environ["HOOK_CMD"]; MODE = os.environ["MODE"]
-MATCHER = "Write|Edit|MultiEdit|NotebookEdit|Bash"
+MATCHER = "Write|Edit|MultiEdit|NotebookEdit|Bash|PowerShell"
 if not os.path.isfile(S):
     print("설정 파일 없음: %s" % S, file=sys.stderr); sys.exit(3)
 try:

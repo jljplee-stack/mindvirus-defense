@@ -33,9 +33,11 @@ done
 if [ "${SELFTEST:-0}" = "1" ]; then
   # 배터리: 인자 검증 경로만(편집기 상호작용은 대상 밖 — EDITOR=true 로 무편집 시뮬)
   f=0
+  TMP_TEST_DIR="$(mktemp -d)"
+  trap 'rm -rf "$TMP_TEST_DIR"' EXIT
   "$0" --reason "x" >/dev/null 2>&1; [ $? = 4 ] || { echo "  FAIL ①파일 누락이 거부 안 됨"; f=$((f+1)); }
-  "$0" /tmp/nope.md >/dev/null 2>&1;  [ $? = 4 ] || { echo "  FAIL ②사유 누락이 거부 안 됨"; f=$((f+1)); }
-  "$0" /tmp/definitely-not-here-$$.md --reason "x" >/dev/null 2>&1
+  "$0" "$TMP_TEST_DIR/nope.md" >/dev/null 2>&1;  [ $? = 4 ] || { echo "  FAIL ②사유 누락이 거부 안 됨"; f=$((f+1)); }
+  "$0" "$TMP_TEST_DIR/definitely-not-here.md" --reason "x" >/dev/null 2>&1
   [ $? = 4 ] || { echo "  FAIL ③없는 파일이 거부 안 됨"; f=$((f+1)); }
   [ "$f" = "0" ] && { echo "self-test OK — 3 배터리(파일필수·사유필수·실존필수)"; exit 0; }
   echo "self-test: $f 실패" >&2; exit 1
@@ -46,21 +48,22 @@ fi
 [ -f "$FILE" ]   || { echo "canon-edit: 파일 없음: $FILE" >&2; exit 4; }
 
 # ⑴ 선행 무결성 — 이미 경보 상태면 편집을 얹지 않는다(무단 변경을 정당 편집으로 세탁 방지).
-"$VERIFY" >/tmp/.canon-edit-pre.$$ 2>&1; PRE=$?
+PRE_TMP="$(mktemp)"
+trap 'rm -f "$PRE_TMP"' EXIT
+"$VERIFY" >"$PRE_TMP" 2>&1; PRE=$?
 if [ "$PRE" = "2" ]; then
-  if grep -qF "$FILE" /tmp/.canon-edit-pre.$$; then
+  if grep -qF "$FILE" "$PRE_TMP"; then
     echo "canon-edit 거부: '$FILE' 은 이미 무단 변경 경보 상태다." >&2
     echo "  ⛔ 그 위에 편집을 얹으면 무단 변경이 정당한 변경으로 세탁된다." >&2
     echo "  먼저 해소하라 — 원상복구 후 편집하거나, 변경 내용을 확인하고 별도 사유로 재서명하라." >&2
-    grep -A3 -F "$FILE" /tmp/.canon-edit-pre.$$ >&2
-    rm -f /tmp/.canon-edit-pre.$$; exit 6
+    grep -A3 -F "$FILE" "$PRE_TMP" >&2
+    exit 6
   fi
 fi
 if [ "$PRE" = "3" ]; then
   echo "canon-edit: 대조 자체가 실패(설정 오류) — 편집을 진행하지 않는다." >&2
-  cat /tmp/.canon-edit-pre.$$ >&2; rm -f /tmp/.canon-edit-pre.$$; exit 3
+  cat "$PRE_TMP" >&2; exit 3
 fi
-rm -f /tmp/.canon-edit-pre.$$
 
 # 해시는 python 으로 낸다 — shasum(1) 은 POSIX 표준이 아니고 배포판마다 없다(sha256sum 만 있거나
 # 둘 다 없다). 이 킷은 이미 python3 를 요구하므로 의존성을 그쪽으로 통일한다. 값은 동일하다.

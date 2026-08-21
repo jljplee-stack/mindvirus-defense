@@ -1,6 +1,6 @@
 {
   "_comment": "mindvirus-defense kit 층 ③ — 에이전트 공용 settings.json 의 hooks.PreToolUse 배열에 이 객체 1개를 추가한다. 다른 훅은 건드리지 않는다. 손으로 넣지 말고 install-canon-guard.sh 를 쓰면 멱등·백업·JSON 검증이 함께 된다. command 의 __KIT_ROOT__ 를 실제 경로로 치환하라.",
-  "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash",
+  "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash|PowerShell",
   "hooks": [
     {
       "type": "command",

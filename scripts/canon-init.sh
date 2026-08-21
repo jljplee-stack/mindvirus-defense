@@ -16,6 +16,14 @@ KIT_ROOT="${KIT_ROOT:-$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)}"
 CANON_HOME="${CANON_HOME:-$HOME/.canon}"
 INVENTORY="${CANON_INVENTORY:-$CANON_HOME/inventory.conf}"
 PROTECTED="${CANON_PROTECTED:-$CANON_HOME/protected.conf}"
+
+_py_path() {
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -w "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
 DRY=0; ONLY_PROT=0
 for a in "$@"; do
   case "$a" in
@@ -62,9 +70,24 @@ elif [ -f "$INVENTORY" ]; then
     say "  · python 부재 — protected.conf 파생 생략(가드가 실행 시 인벤토리에서 파생한다)"
   else
     TMPOUT="$(mktemp)"
-    INVENTORY="$INVENTORY" CANON_HOME="$CANON_HOME" KIT_ROOT="$KIT_ROOT" "$PY" - > "$TMPOUT" <<'PYEOF'
-import os
-inv = os.environ["INVENTORY"]
+    INVENTORY="$(_py_path "$INVENTORY")" CANON_HOME="$(_py_path "$CANON_HOME")" KIT_ROOT="$(_py_path "$KIT_ROOT")" "$PY" - > "$TMPOUT" <<'PYEOF'
+import os, re
+
+def _canon(p):
+    p = os.path.expanduser(str(p or "")).replace("\\", "/")
+    if os.name == "nt":
+        if p == "/tmp" or p.startswith("/tmp/"):
+            temp_root = os.environ.get("TEMP") or os.environ.get("TMP")
+            if temp_root:
+                p = temp_root.replace("\\", "/").rstrip("/") + p[4:]
+        m = re.match(r"^/([A-Za-z])(/|$)", p)
+        if m:
+            p = m.group(1).upper() + ":/" + p[3:]
+    if not os.path.isabs(p):
+        p = os.path.abspath(p)
+    return os.path.normpath(p).replace("\\", "/")
+
+inv = _canon(os.environ["INVENTORY"])
 out = []
 for line in open(inv, encoding="utf-8"):
     s = line.rstrip("\n")
@@ -73,15 +96,15 @@ for line in open(inv, encoding="utf-8"):
     parts = [x for x in s.split("\t") if x != ""]
     if len(parts) < 2:
         continue
-    tier, sel = parts[0].strip(), os.path.expanduser(parts[1].strip())
+    tier, sel = parts[0].strip(), _canon(parts[1].strip())
     if tier in ("watch", "watch-soft"):
-        out.append(os.path.normpath(sel) + "/")
+        out.append(_canon(sel) + "/")
     elif any(c in sel for c in "*?["):
-        out.append(os.path.normpath(os.path.dirname(sel)) + "/")
+        out.append(_canon(os.path.dirname(sel)) + "/")
     else:
-        out.append(sel)
-out.append(os.path.normpath(os.environ["CANON_HOME"]) + "/")
-out.append(os.path.normpath(os.environ["KIT_ROOT"]) + "/scripts/")
+        out.append(_canon(sel))
+out.append(_canon(os.environ["CANON_HOME"]) + "/")
+out.append(_canon(os.environ["KIT_ROOT"]) + "/scripts/")
 print("# canon protected v1 — 층 ③ 가드의 보호 경로 목록(줄당 1개, 끝의 / = 디렉터리 접두).")
 print("# canon-init.sh 가 inventory.conf 에서 파생했다. **손으로 더 넓혀도 된다** —")
 print("# ③은 예방이라 넓을수록 좋고, 과차단 여부는 canon-guard.sh --self-test 의 A군이 지킨다.")
