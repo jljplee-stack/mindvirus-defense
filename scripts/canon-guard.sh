@@ -249,11 +249,14 @@ def _redirect_targets(tokens):
     out, i = [], 0
     while i < len(tokens):
         t = tokens[i]
+        if getattr(t, "literal_operator", False):
+            i += 1
+            continue
         if t in (">", ">>", ">|", "1>", "2>", "&>", ">&"):
             if i + 1 < len(tokens):
                 out.append(tokens[i + 1])
             i += 2; continue
-        m = re.search(r">+\|?", t)
+        m = re.search(r">+(?:\||&)?", t)
         if m and not t.startswith("-"):
             tail = t[m.end():]
             if tail:
@@ -267,15 +270,94 @@ def _clean_token(token):
     """PowerShell/Windows 토큰의 인용부호와 끝 구두점을 경로 비교 전에 제거한다."""
     return str(token or "").strip().strip("'\"").rstrip(",)]}")
 
+_OPERATOR_CHARS = set("<>&|;")
+_ESCAPED_OPERATOR_MARK = "\ue000"
+_ESCAPED_OPERATOR_CODES = {"<": "L", ">": "G", "&": "A", "|": "P", ";": "S"}
+_ESCAPED_OPERATOR_RESTORE = {
+    _ESCAPED_OPERATOR_MARK + code: char
+    for char, code in _ESCAPED_OPERATOR_CODES.items()
+}
+
+class _LiteralToken(str):
+    def __new__(cls, value, literal_operator=False):
+        obj = str.__new__(cls, value)
+        obj.literal_operator = literal_operator
+        return obj
+
+def _operator_mark(ch):
+    return _ESCAPED_OPERATOR_MARK + _ESCAPED_OPERATOR_CODES[ch]
+
+def _restore_operator_marks(value):
+    text = str(value or "")
+    for mark, char in _ESCAPED_OPERATOR_RESTORE.items():
+        text = text.replace(mark, char)
+    return text
+
+def _normalize_operator_runs(command):
+    """Tokenization 전에 따옴표/escape를 존중하며 연산자 런을 공백으로 감싼다."""
+    text = str(command or "")
+    out, quote, i = [], None, 0
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == "\\" and quote == '"' and i + 1 < len(text):
+                if text[i + 1] in _OPERATOR_CHARS:
+                    out.append(_operator_mark(text[i + 1]))
+                else:
+                    out.extend((ch, text[i + 1]))
+                i += 2; continue
+            out.append(_operator_mark(ch) if ch in _OPERATOR_CHARS else ch)
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch; out.append(ch); i += 1; continue
+        if ch == "\\" and i + 1 < len(text):
+            if text[i + 1] in _OPERATOR_CHARS:
+                out.append(_operator_mark(text[i + 1]))
+            else:
+                out.extend((ch, text[i + 1]))
+            i += 2
+            continue
+        if ch not in _OPERATOR_CHARS:
+            out.append(ch); i += 1; continue
+
+        start = i
+        while i < len(text) and text[i] in _OPERATOR_CHARS:
+            i += 1
+        fd_start = start
+        digit = start - 1
+        if digit >= 0 and text[digit].isdigit():
+            fd_start = digit
+            while fd_start > 0 and text[fd_start - 1].isdigit():
+                fd_start -= 1
+            if fd_start > 0 and not text[fd_start - 1].isspace():
+                fd_start = start
+        if fd_start < start:
+            del out[-(start - fd_start):]
+        if out and not out[-1].isspace():
+            out.append(" ")
+        out.extend(text[fd_start:i])
+        if i < len(text) and not text[i].isspace():
+            out.append(" ")
+    return "".join(out)
+
 def _command_tokens(cmd, preserve_backslashes=False):
     """POSIX shlex를 기본으로 하되, Windows 경로가 있으면 백슬래시를 보존한다."""
     try:
-        lexer = shlex.shlex(cmd, posix=not preserve_backslashes, punctuation_chars=";|&")
+        normalized = _normalize_operator_runs(cmd)
+        lexer = shlex.shlex(normalized, posix=not preserve_backslashes, punctuation_chars="")
         lexer.whitespace_split = True
         tokens = list(lexer)
     except ValueError:
         return []
-    return [_clean_token(t) for t in tokens]
+    cooked = []
+    for token in tokens:
+        cleaned = _clean_token(token)
+        literal = any(mark in cleaned for mark in _ESCAPED_OPERATOR_RESTORE)
+        cooked.append(_LiteralToken(_restore_operator_marks(cleaned), literal))
+    return cooked
 
 def _path_hits(text, protected=None):
     """문자열 안의 토큰/인용 문자열을 _canon() 경유로 정본과 대조한다."""
@@ -299,7 +381,7 @@ def _segments(tokens):
     """; && || | 로 끊어 명령 단위로."""
     seg, cur = [], []
     for t in tokens:
-        if t in (";", "&&", "||", "|", "&"):
+        if not getattr(t, "literal_operator", False) and t in (";", "&&", "||", "|", "&"):
             if cur: seg.append(cur)
             cur = []
         else:
@@ -510,7 +592,7 @@ def _raw_scan(text, protected=None):
 
 def _has_powershell_escape(text):
     low = str(text or "").lower()
-    if re.search(r"(?<![\w-])(?:iex|invoke-expression|invoke-command|start-process|powershell|pwsh)(?![\w-])", low):
+    if re.search(r"(?<![\w-])(?:iex|invoke-expression|invoke-command|invokecommand|invokescript|start-process|start-job|start-threadjob|powershell|pwsh|icm|get-command|gcm|saps)(?![\w-])", low):
         return True
     if re.search(r"(?<![\w-])-(?:encodedcommand|command)(?![\w-])", low):
         return True
@@ -518,11 +600,13 @@ def _has_powershell_escape(text):
         return True
     if re.search(r"&\s*\{", text):
         return True
+    if re.search(r"&\s*\(", text):
+        return True
     return False
 
 def _raw_redirect_scan(text, protected=None):
     prot = protected if protected is not None else protected_list()
-    for match in re.finditer(r">+\|?\s*['\"]?([^'\"\s;&|<>(),]+)", str(text or "")):
+    for match in re.finditer(r">+(?:\||&)?\s*['\"]?([^'\"\s;&|<>(),]+)", str(text or "")):
         candidate = match.group(1).rstrip(".])}")
         hit = is_canon(candidate, prot)
         if hit:
@@ -644,6 +728,12 @@ def self_test():
     MSYS = r"/c/Users/이상윤/.cys/pack/soul.md"
     P.append(WIN)
     P.append(MSYS)
+    BB_AMP = G + "/a&b/x.md"
+    BB_SEMI = G + "/c;d/y.md"
+    BB_PIPE = G + "/pipe|x.md"
+    BB_GT = G + "/gt>x.md"
+    WIN_AMP = r"C:\Users\이상윤\.cys\pack\a&b\x.md"
+    P.extend((BB_AMP, BB_SEMI, BB_PIPE, BB_GT, WIN_AMP))
     fails = []
     results = {}
     def chk(name, data, want):
@@ -722,6 +812,12 @@ def self_test():
     chk("R4 Start-Process",      PW("Start-Process powershell -ArgumentList \"Set-Content -Path '%s/soul.md' -Value evil\"" % G), True)
     chk("R5 Bash eval Windows",  B('eval "echo evil > %s"' % WIN), True)
     chk("R6 Bash sh msys",       B('sh -c "echo evil > %s"' % MSYS), True)
+    chk("R7 PS icm",             PW("icm -ScriptBlock { Set-Content -Path '%s/soul.md' -Value evil }" % G), True)
+    chk("R8 PS Start-Job",       PW("Start-Job -ScriptBlock { Set-Content -Path '%s/soul.md' -Value evil }" % G), True)
+    chk("R9 PS &(gcm sc)",       PW("&(gcm sc) %s/soul.md evil" % G), True)
+    chk("R10 PS InvokeScript",   PW("$ExecutionContext.InvokeCommand.InvokeScript(\"Set-Content -Path '%s/soul.md' -Value evil\")" % G), True)
+    chk("R11 PS Start-ThreadJob",PW("Start-ThreadJob -ScriptBlock { Set-Content -Path '%s/soul.md' -Value evil }" % G), True)
+    chk("R12 PS saps",           PW("saps -ArgumentList \"Set-Content -Path '%s/soul.md' -Value evil\"" % G), True)
 
     # ── 탈출 구문 S군: 읽기 또는 작업 파일 쓰기는 통과 ──
     chk("S1 iex 읽기",           PW("iex \"Get-Content %s/CLAUDE.md\"" % G), False)
@@ -736,6 +832,87 @@ def self_test():
     chk("T5 세미콜론 cp",        B("echo x;cp evil %s/soul.md" % G), True)
     chk("T6 PS 세미콜론",        PW("echo hi; Set-Content -Path %s/soul.md -Value x" % G), True)
     chk("T7 PS 세미콜론 ri",     PW("dir; ri %s/soul.md" % G), True)
+    chk("T8 PS 붙은 세미콜론",    PW("echo hi;Set-Content -Path %s/soul.md -Value x" % G), True)
+    chk("T9 PS 붙은 세미콜론 ri", PW("dir;ri %s/soul.md" % G), True)
+    chk("T10 Bash WIN forward",   B("echo x;touch %s" % WIN.replace("\\", "/")), True)
+    chk("T11 Bash MSYS",          B("echo x;touch %s" % MSYS), True)
+    chk("T12 Bash WIN backslash", B("echo x;touch %s" % WIN), True)
+
+    # 신규 V군: 분해된 리다이렉션·PowerShell 폴백은 정본 쓰기를 모두 차단해야 한다.
+    chk("V1 >| 붙임",             B("echo evil>|%s/CLAUDE.md" % G), True)
+    chk("V2 >| 띄움",             B("echo evil >| %s/CLAUDE.md" % G), True)
+    chk("V3 printf >|",           B("printf x>|%s/CLAUDE.md" % G), True)
+    chk("V4 &>",                 B("echo evil&>%s/CLAUDE.md" % G), True)
+    chk("V5 &>>",                B("echo evil&>>%s/CLAUDE.md" % G), True)
+    chk("V6 2>",                 B("echo evil 2>%s/CLAUDE.md" % G), True)
+    chk("V7 2>>",                B("echo evil 2>>%s/CLAUDE.md" % G), True)
+    chk("V8 >&",                 B("echo evil>&%s/CLAUDE.md" % G), True)
+    chk("V9 2>|",                B("echo evil 2>|%s/CLAUDE.md" % G), True)
+
+    # 신규 W군: 정상 파이프·정본 읽기→비정본 쓰기는 통과해야 한다.
+    chk("W11 정상 pipe",          B("cat a|grep b"), False)
+    chk("W12 read other",         B("grep x %s/CLAUDE.md > /tmp/out.txt" % G), False)
+    chk("W13 read other >>>",     B("grep x %s/CLAUDE.md>>>/tmp/out.txt" % G), False)
+    chk("W14 무관 clobber",       B("echo ok>|/tmp/work.txt"), False)
+    chk("W15 PS icm read",        PW("icm -ScriptBlock { Get-Content %s/CLAUDE.md }" % G), False)
+
+    # X군: 값 토큰이 우연히 '>'로 끝나도 뒤 명령을 놓치지 않고 차단.
+    chk("X1 value> pipe rm",       B('echo "junk>" | rm %s/CLAUDE.md' % G), True)
+    chk("X2 value> pipe touch",    B('echo "a>" | touch %s/CLAUDE.md' % G), True)
+    chk("X3 value> pipe cp",       B("echo 'a>' | cp evil %s/CLAUDE.md" % G), True)
+    chk("X4 value> pipe printf",   B('printf "%s>" | rm %s/CLAUDE.md' % ("%s", G)), True)
+    chk("X5 value> amp rm",        B('echo "x>" & rm %s/CLAUDE.md' % G), True)
+    chk("X6 value> PS pipe",       PW('echo "x>" | Set-Content -Path %s/CLAUDE.md -Value evil' % G), True)
+    chk("X7 number> pipe rm",      B("echo 1> | rm %s/CLAUDE.md" % G), True)
+
+    # Y군: 구분자 뒤 읽기/무관 쓰기는 계속 통과.
+    chk("Y1 value> grep",          B('echo "junk>" | grep x'), False)
+    chk("Y2 value> cat read",      B('echo "a>" | cat %s/CLAUDE.md' % G), False)
+    chk("Y3 normal pipe",          B("cat a|grep b"), False)
+    chk("Y4 unrelated clobber",    B("echo ok>|/tmp/work.txt"), False)
+    chk("Y5 read other",           B("grep x %s/CLAUDE.md > /tmp/out.txt" % G), False)
+    chk("X8 WIN forward",          B('echo "x>" | rm %s' % WIN.replace("\\", "/")), True)
+    chk("X9 MSYS path",            B("echo 'a>' | touch %s" % MSYS), True)
+    chk("X10 WIN backslash",       B('echo "x>" | rm %s' % WIN), True)
+    chk("Y6 WIN forward read",     B('echo "junk>" | cat %s' % WIN.replace("\\", "/")), False)
+    chk("Y7 MSYS read",            B("echo 'a>' | cat %s" % MSYS), False)
+    chk("Y8 WIN backslash read",   B('echo "a>" | cat %s' % WIN), False)
+
+    # Z군: operator run 정규화 후 누락 없는 정본 쓰기 차단.
+    chk("Z1 fd 1>|",               B("printf x 1>|%s/CLAUDE.md" % G), True)
+    chk("Z2 &>|",                  B("echo evil &>| %s/CLAUDE.md" % G), True)
+    chk("Z3 quoted >",             B('echo ">" | rm %s/CLAUDE.md' % G), True)
+    chk("Z4 quoted >>",            B('echo ">>" | rm %s/CLAUDE.md' % G), True)
+    chk("Z5 quoted &",             B('echo "&" | rm %s/CLAUDE.md' % G), True)
+    chk("Z6 single quoted >",      B("echo '>' | rm %s/CLAUDE.md" % G), True)
+    chk("Z7 quoted pipe semi",     B('echo "|" ; rm %s/CLAUDE.md' % G), True)
+    chk("Z8 fd 2>>",               B("2>>%s/CLAUDE.md" % G), True)
+    chk("Z9 &>| attached",         B("&>|%s/CLAUDE.md" % G), True)
+
+    # AA군: 인용/escape 리터럴과 정상 read·무관 write는 통과.
+    chk("AA1 quoted > grep",       B('echo ">" | grep x'), False)
+    chk("AA2 quoted junk read",    B('echo "junk>" | cat %s/CLAUDE.md' % G), False)
+    chk("AA3 escaped >",           B(r"echo evil \> %s/CLAUDE.md" % G), False)
+    chk("AA4 normal pipe",         B("cat a|grep b"), False)
+    chk("AA5 fd clobber other",    B("echo ok 1>|/tmp/work.txt"), False)
+    chk("AA6 read other",          B("grep x %s/CLAUDE.md > /tmp/out.txt" % G), False)
+
+    # BB군: 정본 경로 자체에 연산자 문자가 있어도 인용/escape 경로를 차단.
+    chk("BB1 quoted amp path",      B('rm "%s"' % BB_AMP), True)
+    chk("BB2 escaped amp path",     B(r"rm %s" % (G + "/a\\&b/x.md")), True)
+    chk("BB3 single semi path",     B("rm '%s'" % BB_SEMI), True)
+    chk("BB4 Write amp path",       W(BB_AMP), True)
+    chk("BB5 pipe path",            B('rm "%s"' % BB_PIPE), True)
+    chk("BB6 gt path",              B('rm "%s"' % BB_GT), True)
+    chk("BB7 WIN amp path",         B('rm "%s"' % WIN_AMP), True)
+
+    # CC군: 인용/escape 연산자는 비연산자로 유지되고 무관 작업은 통과.
+    chk("CC1 quoted > grep",        B('echo ">" | grep x'), False)
+    chk("CC2 quoted path read",     B('cat "%s"' % BB_AMP), False)
+    chk("CC3 escaped >",            B(r"echo evil \> %s" % G), False)
+    chk("CC4 quoted read other",    B('grep x "%s" > /tmp/out.txt' % BB_AMP), False)
+    chk("CC5 unrelated amp write",  B('touch "/tmp/a&b.txt"'), False)
+    chk("CC6 normal pipe",          B("cat a|grep b"), False)
 
     # ── 구분자 토큰화 U군: 연결된 읽기/무관 쓰기는 통과 ──
     chk("U1 세미콜론 cat",        B("echo x;cat %s/CLAUDE.md" % G), False)
@@ -785,6 +962,14 @@ def self_test():
     print("self-test evidence S: %s" % evidence("S"))
     print("self-test evidence T: %s" % evidence("T"))
     print("self-test evidence U: %s" % evidence("U"))
+    print("self-test evidence V: %s" % evidence("V"))
+    print("self-test evidence W: %s" % evidence("W"))
+    print("self-test evidence X: %s" % evidence("X"))
+    print("self-test evidence Y: %s" % evidence("Y"))
+    print("self-test evidence Z: %s" % evidence("Z"))
+    print("self-test evidence AA: %s" % evidence("AA"))
+    print("self-test evidence BB: %s" % evidence("BB"))
+    print("self-test evidence CC: %s" % evidence("CC"))
     case_count = len(results) + 1
     if fails:
         print("\n".join("  FAIL " + f for f in fails), file=sys.stderr)
