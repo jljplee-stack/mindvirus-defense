@@ -243,6 +243,10 @@ def strip_prefixes(seg):
         break
     return seg[i:] if i < n else seg
 
+_FD_NUM = re.compile(r"\d+")
+_FD_AMP = re.compile(r"&\d+")
+
+
 def _redirect_targets(tokens):
     """'>' '>>' '>|' 및 붙여쓴 형태(x>file)의 **대상**만 뽑는다.
     (grep foo canon.md > /tmp/out 처럼 정본을 *읽고* 딴 데 쓰는 건 막지 않기 위해 대상만 본다)"""
@@ -253,12 +257,25 @@ def _redirect_targets(tokens):
             i += 1
             continue
         if t in (">", ">>", ">|", "1>", "2>", "&>", ">&"):
-            if i + 1 < len(tokens):
-                out.append(tokens[i + 1])
+            nxt = tokens[i + 1] if i + 1 < len(tokens) else None
+            # ★fd 복제: `2> &1` 처럼 띄어 쓴 형태와 `>& 2`. 대상이 파일이 아니라 디스크립터다.
+            if nxt is not None and (_FD_AMP.fullmatch(str(nxt))
+                                    or (t == ">&" and _FD_NUM.fullmatch(str(nxt)))):
+                i += 2; continue
+            if nxt is not None:
+                out.append(nxt)
             i += 2; continue
         m = re.search(r">+(?:\||&)?", t)
         if m and not t.startswith("-"):
+            op = t[m.start():m.end()]
             tail = t[m.end():]
+            # ★fd 복제(2>&1 · 1>&2 · >&2)의 꼬리는 **파일이 아니라 파일 디스크립터**다.
+            #   파일명으로 잡으면 '1' 이 정본 디렉터리 기준으로 정규화돼 정상 명령을 오차단한다
+            #   (2026-08-23 실측 3건). '&' 가 붙은 연산자 + **순수 숫자 꼬리**일 때만 건너뛴다 —
+            #   `> 1`(파일명이 1)·`2>&1 > 정본`(뒤의 진짜 쓰기)은 그대로 대상으로 남는다.
+            if "&" in op and _FD_NUM.fullmatch(tail):
+                i += 1
+                continue
             if tail:
                 out.append(tail)
             elif i + 1 < len(tokens):
@@ -896,6 +913,18 @@ def self_test():
     chk("AA4 normal pipe",         B("cat a|grep b"), False)
     chk("AA5 fd clobber other",    B("echo ok 1>|/tmp/work.txt"), False)
     chk("AA6 read other",          B("grep x %s/CLAUDE.md > /tmp/out.txt" % G), False)
+
+    # DD군: fd 복제(2>&1 류)는 **파일 쓰기가 아니다** — 꼬리 숫자는 파일명이 아니라 디스크립터다.
+    #   2026-08-23 실측: `_redirect_targets` 가 `2>&1` 의 '1' 을 대상 파일로 잡아, 정본 디렉터리
+    #   기준으로 정규화되며 정상 조회를 하루 3건 오차단했다(canon-check·canon-resign·조회).
+    #   ★DD6~DD8 은 그 제외가 **진짜 쓰기를 뚫지 않는지** 지키는 음성 대조군이다(양성만큼 두껍게).
+    chk("DD1 fd dup attached",     B("./canon-check.sh 2>&1 | tail -5"), False)
+    chk("DD2 fd dup 1>&2",         B("echo hi 1>&2"), False)
+    chk("DD3 fd dup >&2",          B("echo hi >&2"), False)
+    chk("DD4 fd dup spaced",       B("cmd 2> &1"), False)
+    chk("DD5 fd dup read canon",   B("grep x %s/CLAUDE.md 2>&1 | head -3" % G), False)
+    chk("DD7 fd dup then write",   B("cmd 2>&1 > %s/CLAUDE.md" % G), True)
+    chk("DD8 fd dup then append",  B("cmd 2>&1 >> %s/CLAUDE.md" % G), True)
 
     # BB군: 정본 경로 자체에 연산자 문자가 있어도 인용/escape 경로를 차단.
     chk("BB1 quoted amp path",      B('rm "%s"' % BB_AMP), True)
