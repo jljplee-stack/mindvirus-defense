@@ -273,9 +273,15 @@ def _redirect_targets(tokens):
             #   파일명으로 잡으면 '1' 이 정본 디렉터리 기준으로 정규화돼 정상 명령을 오차단한다
             #   (2026-08-23 실측 3건). '&' 가 붙은 연산자 + **순수 숫자 꼬리**일 때만 건너뛴다 —
             #   `> 1`(파일명이 1)·`2>&1 > 정본`(뒤의 진짜 쓰기)은 그대로 대상으로 남는다.
-            if "&" in op and _FD_NUM.fullmatch(tail):
-                i += 1
-                continue
+            if "&" in op:
+                if _FD_NUM.fullmatch(tail):
+                    i += 1
+                    continue
+                # ★`2>&` + `1` 로 쪼개진 형태 — tail 이 비어 있으면 아래 '빈 tail' 분기가
+                #   다음 토큰(디스크립터 번호)을 **파일 대상으로** 집어간다. 여기서 끊는다.
+                if not tail and i + 1 < len(tokens) and _FD_NUM.fullmatch(str(tokens[i + 1])):
+                    i += 2
+                    continue
             if tail:
                 out.append(tail)
             elif i + 1 < len(tokens):
@@ -753,8 +759,9 @@ def self_test():
     P.extend((BB_AMP, BB_SEMI, BB_PIPE, BB_GT, WIN_AMP))
     fails = []
     results = {}
-    def chk(name, data, want):
-        got, why = decide(data, P)
+    def chk(name, data, want, prot=None):
+        # prot 를 주면 그 목록으로 판정한다 — cwd 축(EE군)이 임시 정본 루트를 쓰기 위해서다.
+        got, why = decide(data, prot if prot is not None else P)
         results[name.split(" ", 1)[0]] = got
         if got != want:
             fails.append("%s: 기대 block=%s 실제 %s (%s)" % (name, want, got, why))
@@ -925,6 +932,27 @@ def self_test():
     chk("DD5 fd dup read canon",   B("grep x %s/CLAUDE.md 2>&1 | head -3" % G), False)
     chk("DD7 fd dup then write",   B("cmd 2>&1 > %s/CLAUDE.md" % G), True)
     chk("DD8 fd dup then append",  B("cmd 2>&1 >> %s/CLAUDE.md" % G), True)
+
+    # EE군: ★**cwd 축** — 이 축이 없어서 2026-08-23 오차단 6건이 시험을 통째로 빠져나갔다.
+    #   guard 는 상대경로를 `_canon()` 의 os.path.abspath 로 절대화한다 = **프로세스 cwd 기준**.
+    #   그러므로 "cwd 가 정본 디렉터리일 때"는 **실제로 chdir 해야** 재현된다(JSON 필드로는 안 된다 —
+    #   guard 는 cwd 를 입력에서 읽지 않는다). 위 DD군은 가상 루트로 판정만 보므로
+    #   수리 전 코드에서도 통과했다 — 그게 A군이 결함을 놓친 기전이다.
+    #   ★EE3~EE5 는 음성 대조군이다: cwd 가 정본이면 상대경로 쓰기·삭제는 **차단이 맞다**.
+    import tempfile as _tf, shutil as _sh
+    _cwd_root = _tf.mkdtemp(prefix="canon-cwd-axis-")
+    _P_cwd = [_canon(_cwd_root) + "/"]
+    _old_cwd = os.getcwd()
+    try:
+        os.chdir(_cwd_root)
+        chk("EE1 fd dup 2>&1 (cwd=정본)",   B("./canon-check.sh 2>&1 | tail -5"), False, _P_cwd)
+        chk("EE2 fd dup 1>&2 (cwd=정본)",   B("echo hi 1>&2"), False, _P_cwd)
+        chk("EE3 상대 쓰기 (cwd=정본)",      B("echo x > out.txt"), True, _P_cwd)
+        chk("EE4 상대 rm (cwd=정본)",        B("rm out.txt"), True, _P_cwd)
+        chk("EE5 미확장 변수 (cwd=정본)",     B("cp a $SB/b.txt"), True, _P_cwd)
+    finally:
+        os.chdir(_old_cwd)
+        _sh.rmtree(_cwd_root, ignore_errors=True)
 
     # BB군: 정본 경로 자체에 연산자 문자가 있어도 인용/escape 경로를 차단.
     chk("BB1 quoted amp path",      B('rm "%s"' % BB_AMP), True)
