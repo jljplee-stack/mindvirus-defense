@@ -1,0 +1,2 @@
+# The guard runs straight from this working tree; keep shell scripts LF on every checkout.
+*.sh text eol=lf
