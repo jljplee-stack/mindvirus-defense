@@ -187,7 +187,27 @@ def protected_list():
         print("canon-guard: 보호 목록 %d건 (출처 %s)" % (len(_PROT_CACHE), src), file=sys.stderr)
     return _PROT_CACHE
 
+_BASH_CONTEXT = None
+
+
+def _shell_path(p, cwd, directory=False):
+    p = str(p or "")
+    p = re.sub(r"^\$(?:HOME\b|\{HOME\})", HOME, p)
+    if p == "~" or p.startswith("~/"):
+        p = HOME + p[1:]
+    if directory and (any(c in p for c in ("$", "`")) or p.startswith("~")):
+        return None
+    absolute = p.startswith(("/", "\\")) or bool(re.match(r"^[A-Za-z]:[/\\]", p))
+    if not absolute:
+        if cwd is None:
+            return None
+        p = cwd.rstrip("/\\") + "/" + p
+    return _canon(p)
+
+
 def norm(p):
+    if _BASH_CONTEXT is not None:
+        return _shell_path(p, _BASH_CONTEXT[0])
     return _canon(p)
 
 def is_canon(path, protected=None):
@@ -195,6 +215,8 @@ def is_canon(path, protected=None):
         return None
     prot = protected if protected is not None else protected_list()
     n = norm(path)
+    if n is None:
+        return "unresolved shell path/cwd; target could be canon" if prot else None
     for p in prot:
         if p.endswith("/"):
             base = _canon(p[:-1])
@@ -208,7 +230,10 @@ def is_canon(path, protected=None):
 # ── Bash 명령 분석 ───────────────────────────────────────────────────
 WRITE_CMDS_ANY = {"rm", "unlink", "shred", "truncate", "chmod", "chown", "chflags", "touch"}
 DEST_LAST_CMDS = {"mv", "cp", "install", "ln", "rsync"}
-INTERPRETERS   = {"python", "python3", "python2", "perl", "ruby", "node", "osascript", "php"}
+def _interpreter(command):
+    base = command.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    base = base.removesuffix(".exe")
+    return bool(re.fullmatch(r"(?:py(?:thon)?|perl|ruby|node|osascript|php)(?:\d+(?:\.\d+)*)?", base))
 ESCAPES        = ("bash -c", "sh -c", "zsh -c", "eval ", "$(", "`", "xargs")
 
 # ★세그먼트 앞에 붙어 실제 명령을 가리는 것들. 이것을 벗기지 않으면
@@ -218,13 +243,14 @@ _ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 WRAPPERS = {"env", "command", "builtin", "exec", "nohup", "nice", "ionice",
             "stdbuf", "time", "setsid", "doas", "sudo"}
 # 값을 하나 더 먹는 옵션(래퍼별) — 그 값을 명령 이름으로 오인하지 않기 위해 함께 건너뛴다
-WRAPPER_OPTS_WITH_ARG = {"-u", "--unset", "-n", "-c", "--chdir", "-o", "-e", "-i0", "-S", "--user"}
+WRAPPER_OPTS_WITH_ARG = {"-u", "--unset", "-n", "-c", "-C", "--chdir", "-o", "-e", "-i0", "-S", "--user"}
 
-def strip_prefixes(seg):
+def strip_prefixes(seg, legacy=False):
     """환경변수 할당·래퍼를 벗겨 **실제 명령 토큰부터 시작하는** 세그먼트를 돌려준다.
     벗길 수 없으면 원본을 그대로 돌려준다(과차단보다 원형 유지가 안전한 지점은 없다 —
     이 층은 예방이므로, 애매하면 아래 ⑤ 잔여 스캔이 다시 본다)."""
     i, n = 0, len(seg)
+    options = WRAPPER_OPTS_WITH_ARG - {"-C"} if legacy else WRAPPER_OPTS_WITH_ARG
     while i < n:
         t = seg[i]
         if _ASSIGN_RE.match(t):          # LANG=C · FOO=bar
@@ -236,7 +262,7 @@ def strip_prefixes(seg):
                 if _ASSIGN_RE.match(a):       # env FOO=bar cmd
                     i += 1; continue
                 if a.startswith("-"):
-                    i += 2 if a in WRAPPER_OPTS_WITH_ARG else 1
+                    i += 2 if a in options else 1
                     continue
                 break
             continue
@@ -412,7 +438,7 @@ def _segments(tokens):
     if cur: seg.append(cur)
     return seg
 
-def analyze_bash(cmd, protected=None):
+def _analyze_bash_segment(cmd, protected=None, legacy=False):
     """-> (block: bool, reason: str)"""
     if not cmd or not cmd.strip():
         return False, "empty"
@@ -437,12 +463,17 @@ def analyze_bash(cmd, protected=None):
     for raw_seg in _segments(tokens):
         if not raw_seg:
             continue
-        seg = strip_prefixes(raw_seg)        # ★LANG=C · env · command … 를 벗기고 본다
+        seg = strip_prefixes(raw_seg, legacy=legacy)        # ★LANG=C · env · command … 를 벗기고 본다
         if not seg:
             continue
         base = os.path.basename(seg[0])
         args = [a for a in seg[1:]]
         pos  = [a for a in args if not a.startswith("-")]
+
+        for destination in _option_destinations(seg):
+            resolved = norm(destination)
+            if _canon_directory(resolved, protected if protected is not None else protected_list()):
+                return True, "%s option write destination is canon: %s" % (base, destination)
 
         if base == "tee":
             for a in pos:
@@ -474,7 +505,7 @@ def analyze_bash(cmd, protected=None):
                 if hit:
                     return True, "%s -i(제자리 수정) 대상이 정본: %s (규칙 %s)" % (base, a, hit)
         # ③ 인터프리터 인라인 — 정본 경로가 스크립트 안에 있으면 통째로 거부(읽기도 cat/grep로 하라)
-        if base in INTERPRETERS:
+        if _interpreter(base):
             joined = " ".join(args)
             hit = _raw_scan(joined, protected)
             if hit:
@@ -488,6 +519,470 @@ def analyze_bash(cmd, protected=None):
         if hit:
             return True, "셸 탈출 구문(bash -c/eval/$()/backtick/xargs) + 정본 경로: %s" % hit
     return False, "정본 쓰기 아님"
+
+
+def _git_message_argument(words):
+    return bool(len(words) >= 3 and os.path.basename(words[0]) == "git" and words[1] == "commit"
+                and (words[-1] in ("-m", "--message") or words[-1].startswith("--message=")))
+
+
+def _git_stdin_message(words):
+    if len(words) < 3 or os.path.basename(words[0]) != "git" or words[1] != "commit":
+        return False
+    return any(a in ("-F-", "--file=-") or
+               (a in ("-F", "--file") and i+1 < len(words) and words[i+1] == "-")
+               for i,a in enumerate(words))
+
+
+def _heredoc_documents(command):
+    # One lexical ownership pass. A body is never re-tokenized as another
+    # header. Quoting/comments/substitutions belong to the surrounding shell;
+    # the collected body belongs only to the command before its << operator.
+    lines = command.splitlines(keepends=True)
+    docs, pending, quote, substitutions = [], [], None, []
+    for number,line in enumerate(lines):
+        if pending:
+            doc = pending[0]
+            probe = line.lstrip("\t") if doc["tabs"] else line
+            if probe.rstrip("\r\n") == doc["delimiter"]:
+                doc["closed"], doc["end"] = True, number
+                pending.pop(0)
+            else:
+                doc["body_lines"].append(number)
+                doc["body"] += line
+            continue
+        i, start = 0, 0
+        while i < len(line):
+            ch = line[i]
+            if ch == "\\" and quote != "'":
+                i += 2; continue
+            if quote != "'" and line[i:i+2] == "$(":
+                parent = line[start:i].rstrip()
+                if quote and parent.endswith(quote):
+                    parent = parent[:-1]
+                words = strip_prefixes(_command_tokens(parent))
+                substitutions.append((quote, start, _git_message_argument(words)))
+                quote, start = None, i+2
+                i += 2; continue
+            if not quote and ch == ")" and substitutions:
+                quote, start, _ = substitutions.pop()
+                i += 1; continue
+            if quote:
+                if ch == quote:
+                    quote = None
+            elif ch in "'\"":
+                quote = ch
+            elif ch == "#" and (i == 0 or line[i-1].isspace() or line[i-1] in ";|&()"):
+                break
+            elif ch in ";|&()":
+                start = i+1
+            elif line[i:i+2] == "<<" and line[i:i+3] != "<<<":
+                match = re.match(r"<<(-?)\s*(?:(['\"])([^'\"\r\n]+)\2|([A-Za-z_][A-Za-z0-9_]*))", line[i:])
+                if match:
+                    header = line[start:i]
+                    words = strip_prefixes(_command_tokens(header))
+                    owner = os.path.basename(words[0]) if words else ""
+                    inherited_argument = bool(substitutions and all(item[2] for item in substitutions))
+                    # Only these two git-message consumers qualify. Terminal
+                    # cat output and every file-redirect cat keep live analysis.
+                    git_data = ((owner == "cat" and inherited_argument) or
+                                (_git_stdin_message(words) and all(item[2] for item in substitutions)))
+                    git_data = git_data and not _redirect_targets(_command_tokens(header))
+                    doc = dict(owner=owner, header=header, quoted=bool(match.group(2)),
+                               delimiter=match.group(3) if match.group(2) else match.group(4),
+                               tabs=bool(match.group(1)), git_data=git_data, line=number,
+                               tail=line[i+match.end():], body="", body_lines=[], closed=False, end=number)
+                    docs.append(doc); pending.append(doc)
+                    i += match.end(); continue
+            i += 1
+    return docs
+
+
+def _without_literal_heredocs(command, documents=None):
+    docs = _heredoc_documents(command) if documents is None else documents
+    lines = command.splitlines(keepends=True)
+    # Consumer checks inspect syntax outside all body data, not text such as
+    # '<(' or '|' quoted inside a commit message.
+    syntax = list(lines)
+    for doc in docs:
+        for i in doc["body_lines"]:
+            syntax[i] = "\n" if lines[i].endswith("\n") else ""
+    process_substitution = bool(re.search(r"[<>]\(", "".join(syntax)))
+    out = list(lines)
+    for doc in docs:
+        following = "".join(syntax[doc["end"]+1:]).lstrip()
+        connected_pipe = "|" in doc["tail"] or bool(re.match(r"^[)}\s]*\|", following))
+        if (doc["quoted"] and doc["closed"] and doc["git_data"] and not process_substitution
+                and not connected_pipe and not lines[doc["line"]].rstrip("\r\n").endswith("\\")):
+            for i in doc["body_lines"]:
+                out[i] = "\n" if lines[i].endswith("\n") else ""
+    return "".join(out)
+
+
+def _shell_parts(cmd):
+    # Split only syntax outside quotes/escapes; preserve each segment verbatim
+    # for the established write-target analyzer. Parentheses have scope.
+    parts, buf, quote, i, start = [], [], None, 0, 0
+    while i < len(cmd):
+        c = cmd[i]
+        if c == "\\" and quote != "'" and i + 1 < len(cmd):
+            buf.extend(cmd[i:i+2]); i += 2; continue
+        if quote:
+            buf.append(c)
+            if c == quote:
+                quote = None
+            i += 1; continue
+        if c in "'\"":
+            quote = c; buf.append(c); i += 1; continue
+        if c in "<>" or (c == "&" and cmd[i:i+2] == "&>"):
+            start = i
+            while i < len(cmd) and cmd[i] in "<>&|":
+                i += 1
+            buf.extend(cmd[start:i]); continue
+        if c in ";|&()\n":
+            # Descriptor duplication is not command control flow.
+            if c == "&" and buf and buf[-1] in "><":
+                buf.append(c); i += 1; continue
+            op = c
+            if c in "&|" and cmd[i:i+2] == c*2:
+                op = c*2; i += 1
+            parts.append(("".join(buf), op, cmd.count("\n", 0, start))); buf = []
+            start = i+1
+        else:
+            buf.append(c)
+        i += 1
+    parts.append(("".join(buf), "", cmd.count("\n", 0, start)))
+    return parts
+
+
+def _directory_args(tokens):
+    args, i = [], 1
+    while i < len(tokens):
+        t = tokens[i]
+        if not getattr(t, "literal_operator", False) and re.match(r"^(?:\d*[<>]|&>)", t):
+            # _command_tokens separates active operators from their operands,
+            # including fd duplication (2>&1). Quoted/escaped operators survive.
+            i += 2 if re.fullmatch(r"(?:\d*[<>]+[|&]?|&>)", t) else 1
+            continue
+        if t not in ("--", "-P", "-L", "-e", "-@"):
+            args.append(t)
+        i += 1
+    return args
+
+
+def _canon_directory(d, protected):
+    if d is None:
+        return True
+    value = _canon(d)
+    return any((value == _canon(p.rstrip('/')) or value.startswith(_canon(p.rstrip('/')) + '/'))
+               if p.endswith('/') else os.path.dirname(_canon(p)).replace('\\', '/') == value
+               for p in protected)
+
+
+def _env_wrapped(tokens, dirs):
+    i = 0
+    while i < len(tokens) and _ASSIGN_RE.match(tokens[i]):
+        i += 1
+    if i == len(tokens) or os.path.basename(tokens[i]) != "env":
+        return None
+    i += 1
+    result = set(dirs)
+    while i < len(tokens):
+        arg = tokens[i]
+        if arg in ("-C", "--chdir"):
+            value = tokens[i+1] if i+1 < len(tokens) else "$UNRESOLVED"
+            result = {_shell_path(value, d, directory=True) for d in result}
+            i += 2
+        elif arg.startswith("--chdir="):
+            result = {_shell_path(arg.split('=',1)[1], d, directory=True) for d in result}
+            i += 1
+        elif arg == "--":
+            i += 1; break
+        elif _ASSIGN_RE.match(arg):
+            i += 1
+        elif arg.startswith("-"):
+            i += 2 if arg in WRAPPER_OPTS_WITH_ARG else 1
+        else:
+            break
+    return tokens[i:], result
+
+
+def _join_shell_tokens(tokens):
+    return " ".join(str(t) if not getattr(t, 'literal_operator', False) and
+                    re.fullmatch(r"(?:\d*[<>]+[|&]?|&>)", t) else shlex.quote(str(t)) for t in tokens)
+
+
+def _copy_operands(seg):
+    """One option parser for both copy write locations and staged-file updates."""
+    base, args = os.path.basename(seg[0]), seg[1:]
+    grouped_flags = {"cp": "abdfHiklLnPpRrsTuvx", "mv": "bfinTuv", "install": "bcdDpprsTvC"}[base]
+    value_flags = "Smog" if base == "install" else "S"
+    targets, positional, i = [], [], 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            positional.extend(args[i+1:]); break
+        if arg in ("-t", "--target-directory"):
+            if i+1 < len(args):targets.append(args[i+1])
+            i += 2; continue
+        if arg.startswith("--target-directory="):
+            targets.append(arg.split("=",1)[1])
+        elif arg in ("--suffix", "--mode", "--owner", "--group", "--strip-program"):
+            i += 2; continue
+        elif arg.startswith("--"):
+            pass
+        elif arg.startswith("-") and len(arg) > 1:
+            short = arg[1:]
+            for index, flag in enumerate(short):
+                if flag == "t":
+                    value = short[index+1:] or (args[i+1] if i+1 < len(args) else None)
+                    if value is not None:targets.append(value)
+                    if not short[index+1:]:i += 1
+                    break
+                if flag in value_flags:
+                    if not short[index+1:]:i += 1
+                    break
+                if flag not in grouped_flags:
+                    break
+        else:
+            positional.append(arg)
+        i += 1
+    return targets, positional
+
+
+def _option_destinations(seg):
+    """Directory options which select a write location, preserving read commands."""
+    base = os.path.basename(seg[0]) if seg else ""
+    args = seg[1:]
+    if base in ("cp", "mv", "install"):
+        return _copy_operands(seg)[0]
+    if base not in ("git", "tar"):
+        return []
+    dirs, remainder, i = [], [], 0
+    while i < len(args):
+        arg = args[i]
+        if arg in ("-C", "--directory") and i+1 < len(args):
+            dirs.append(args[i+1]); i += 2; continue
+        if arg.startswith("-C") and len(arg) > 2:
+            dirs.append(arg[2:])
+        elif arg.startswith("--directory="):
+            dirs.append(arg.split("=",1)[1])
+        elif base == "git" and arg in ("-c", "--config-env", "--git-dir", "--work-tree", "--namespace", "--super-prefix"):
+            i += 2; continue
+        elif base == "git" and arg.startswith("-"):
+            pass  # Global Boolean flags and --key=value options precede the verb.
+        else:
+            if base == "git":
+                remainder = args[i:]
+                break
+            remainder.append(arg)
+        i += 1
+    if base == "git":
+        writes = {"checkout", "reset", "restore", "switch", "clean", "merge", "rebase",
+                  "cherry-pick", "revert", "pull", "fetch", "clone", "init", "apply", "am",
+                  "commit", "add", "rm", "mv", "update-index"}
+        if not remainder or remainder[0] not in writes:
+            return []
+        options = remainder[1:remainder.index("--")] if "--" in remainder else remainder[1:]
+        if "--dry-run" in options or (remainder[0] in ("add", "clean", "mv", "rm") and "-n" in options):
+            return []
+        if (remainder[0] == "apply" and "--apply" not in options
+                and any(a in ("--stat", "--numstat", "--summary", "--check") for a in options)):
+            return []
+        # Repeated git -C values are relative to the preceding -C directory.
+        target = ""
+        for value in dirs:
+            target = value if not target else _shell_path(value, norm(target), directory=True)
+        return [target] if dirs else []
+    extracting = any(a == "--extract" or (a.startswith("-") and not a.startswith("--") and "x" in a[1:])
+                     for a in remainder) or bool(remainder and not remainder[0].startswith("-") and "x" in remainder[0])
+    stdout = any(a == "--to-stdout" or (a.startswith("-") and not a.startswith("--") and "O" in a[1:])
+                 for a in remainder) or bool(remainder and not remainder[0].startswith("-") and "O" in remainder[0])
+    target = ""
+    for value in dirs:
+        target = value if not target else _shell_path(value, norm(target), directory=True)
+    return [target] if extracting and dirs and not stdout else []
+
+
+def _script_operand(seg):
+    """Select a script only after consuming Python options with operands."""
+    args, i = seg[1:], 0
+    base = seg[0].replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
+    python = bool(re.fullmatch(r"py(?:thon)?(?:\d+(?:\.\d+)*)?", base))
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            return args[i+1] if i+1 < len(args) else None
+        if (arg == "-" or arg in ("-c", "-e", "--eval") or (arg == "-E" and not python)
+                or (python and arg.startswith(("-c", "-m")))):
+            return None
+        if python and arg in ("-W", "-X", "--check-hash-based-pycs"):
+            i += 2; continue
+        if not arg.startswith("-"):
+            return arg
+        i += 1
+    return None
+
+
+def _invalidate_staged(seg, tokens, dirs, staged):
+    """Later filesystem changes make the earlier cat body obsolete evidence."""
+    if not seg:
+        return
+    base, args = os.path.basename(seg[0]), seg[1:]
+    # Appends retain the known earlier body even if the extra content is unknown.
+    overwrite_tokens = [_LiteralToken(str(t), True) if not getattr(t, 'literal_operator', False)
+                        and re.match(r"^(?:\d*|&)>>", str(t)) else t for t in tokens]
+    paths = list(_redirect_targets(overwrite_tokens))
+    positional = [a for a in args if not a.startswith("-")]
+    if base in ("rm", "unlink", "truncate") or (base == "tee" and not any(a in ("-a", "--append") for a in args)):
+        paths.extend(positional)
+    elif base in ("cp", "mv", "install"):
+        targets, operands = _copy_operands(seg)
+        sources = operands if targets else operands[:-1]
+        destinations = targets or operands[-1:]
+        for destination in destinations:
+            if not targets:paths.append(destination)
+            for source in sources:
+                paths.append(destination.rstrip('/\\') + '/' + source.replace('\\','/').rstrip('/').rsplit('/',1)[-1])
+        if base == "mv":paths.extend(sources)
+    for path in paths:
+        for d in dirs:
+            staged.pop(_shell_path(path, d), None)
+
+
+def analyze_bash(cmd, protected=None, start_dirs=None, depth=0, staged_scripts=None):
+    global _BASH_CONTEXT
+    original = _BASH_CONTEXT
+    prot = protected if protected is not None else protected_list()
+    dirs, previous, stack, directory_stack = (set(start_dirs) if start_dirs is not None else {_canon(os.getcwd())}), set(), [], []
+    staged = staged_scripts if staged_scripts is not None else {}
+    consumed_documents = set()
+    try:
+        raw_command = str(cmd or "")
+        documents = _heredoc_documents(raw_command)
+        document_data_lines = {line for doc in documents for line in doc["body_lines"]}
+        document_data_lines.update(doc["end"] for doc in documents if doc["closed"])
+        command = _without_literal_heredocs(raw_command, documents)
+        # Additive by construction. With no cwd override this is the installed
+        # whole-command analyzer, including cross-segment escape/path checks.
+        # The only permitted preprocessing blanks proven-inert cat body data.
+        _BASH_CONTEXT = None
+        blocked, reason = _analyze_bash_segment(command, prot, legacy=True)
+        if blocked:
+            return True, "whole-command: " + reason
+        for document in documents:
+            if _interpreter(document["owner"]):
+                hit = _raw_scan(document["body"], prot)
+                if hit:
+                    return True, "interpreter heredoc body contains canon path: %s" % hit
+        if depth >= 8:
+            return (True, "nested shell depth with write marker") if _has_write_marker(command) else (False, "nested read")
+        for segment, op, line_number in _shell_parts(command):
+            tokens = _command_tokens(segment)
+            tracking = line_number not in document_data_lines
+            wrapped = _env_wrapped(tokens, dirs)
+            if wrapped is not None:
+                inner, env_dirs = wrapped
+                blocked, reason = analyze_bash(_join_shell_tokens(inner), prot, env_dirs, depth+1,
+                                               staged if tracking else {})
+                if blocked:
+                    return True, "env directory: " + reason
+                segment, tokens = "", []  # still restore a closing subshell below
+            seg = strip_prefixes(tokens) if tokens else []
+            if seg and os.path.basename(seg[0]) in ("cd", "pushd", "popd"):
+                # Redirections on cd itself run before the directory change.
+                for d in dirs:
+                    _BASH_CONTEXT = (d,)
+                    for target in _redirect_targets(tokens):
+                        hit = is_canon(target, protected)
+                        if hit:
+                            return True, "directory-command redirect targets canon: %s" % hit
+                base = os.path.basename(seg[0])
+                args = _directory_args(seg)
+                if base == "popd":
+                    targets = directory_stack.pop() if directory_stack else {None}
+                elif not args:
+                    targets = {HOME} if base == "cd" else (directory_stack.pop() if directory_stack else {None})
+                elif len(args) != 1:
+                    targets = {None}
+                elif args[0] == "-":
+                    targets = previous or {None}
+                else:
+                    targets = {_shell_path(args[0], d, directory=True) for d in dirs}
+                old = dirs
+                if base == "pushd":
+                    directory_stack.append(set(old))
+                # && reaches the next command only on successful cd. With ;
+                # or || retain both branches (failed cd cannot clear protection).
+                dirs = targets if op == "&&" else dirs | targets
+                previous = old
+            elif segment.strip():
+                base = os.path.basename(seg[0]) if seg else ""
+                if tracking:
+                    _invalidate_staged(seg, tokens, dirs, staged)
+                if tracking and base == "cat" and "<<" in segment:
+                    targets = _redirect_targets(_command_tokens(segment))
+                    for doc_index, document in enumerate(documents):
+                        if (doc_index in consumed_documents or document["line"] != line_number
+                                or document["owner"] != "cat" or not document["closed"]):
+                            continue
+                        owned_targets = _redirect_targets(_command_tokens(document["header"] + document["tail"]))
+                        for target in targets:
+                            if target in owned_targets:
+                                for d in dirs:
+                                    key = _shell_path(target, d)
+                                    append_targets = []
+                                    for index, token in enumerate(tokens):
+                                        if not getattr(token, 'literal_operator', False) and re.match(r"^(?:\d*|&)>>", str(token)):
+                                            append_targets.extend(_redirect_targets(tokens[index:index+2]))
+                                    staged[key] = (staged.get(key, "") if target in append_targets else "") + document["body"]
+                                consumed_documents.add(doc_index)
+                if tracking and (base in ("bash", "sh", "zsh", "source", ".") or _interpreter(base)):
+                    args = seg[1:]
+                    script = _script_operand(seg)
+                    if script:
+                        for d in dirs:
+                            body = staged.get(_shell_path(script, d))
+                            if body is None:
+                                continue
+                            if _interpreter(base):
+                                hit = _raw_scan(body, prot)
+                                if hit or _canon_directory(d, prot):
+                                    return True, "staged interpreter script touches canon: %s" % (hit or d)
+                            else:
+                                hit = _raw_scan(body, prot)
+                                if hit and _has_write_marker(body):
+                                    return True, "executed staged shell body has canon write: %s" % hit
+                                blocked, reason = analyze_bash(body, prot, {d}, depth+1)
+                                if blocked:
+                                    return True, "executed staged shell script: " + reason
+                if base in ("bash", "sh", "zsh"):
+                    for idx, arg in enumerate(seg[1:],1):
+                        if arg.startswith('-') and 'c' in arg[1:] and idx+1 < len(seg):
+                            blocked, reason = analyze_bash(str(seg[idx+1]), prot, dirs, depth+1,
+                                                           staged if tracking else {})
+                            if blocked:
+                                return True, "nested shell: " + reason
+                            break
+                for d in dirs:
+                    _BASH_CONTEXT = (d,)
+                    body = command if "<<" in segment else segment
+                    interpreter_code = _interpreter(base) and (
+                        "<<" in segment or any(a in ("-c", "-e", "-E", "--eval") for a in seg[1:]))
+                    if interpreter_code and _canon_directory(d, prot):
+                        return True, "interpreter code in canon or unresolved directory (reads use cat/sed)"
+                    if base in {"eval", "xargs"} and _canon_directory(d, prot) and _has_write_marker(body):
+                        return True, "eval/xargs write in canon or unresolved directory"
+                    blocked, reason = _analyze_bash_segment(segment, protected)
+                    if blocked:
+                        return True, reason
+            if op == "(":
+                stack.append((set(dirs), set(previous), [set(d) for d in directory_stack]))
+            elif op == ")" and stack:
+                dirs, previous, directory_stack = stack.pop()
+        return False, "no canon write in effective shell directories"
+    finally:
+        _BASH_CONTEXT = original
 
 
 # ── PowerShell 명령의 예방층 분석 ─────────────────────────────────────
@@ -950,9 +1445,65 @@ def self_test():
         chk("EE3 상대 쓰기 (cwd=정본)",      B("echo x > out.txt"), True, _P_cwd)
         chk("EE4 상대 rm (cwd=정본)",        B("rm out.txt"), True, _P_cwd)
         chk("EE5 미확장 변수 (cwd=정본)",     B("cp a $SB/b.txt"), True, _P_cwd)
+        chk("R2-REAL-3A git stdin message", B('cd ~/cys-terminal-jarvis && git add my-jarvis/gold/role-bootstrap.sh my-jarvis/scripts/fix_codex_wiring.py && git commit -q -F - <<\'EOF\'\nfeat(wiring): Code Mode on the Claude seats (blocks 52, 53, poll_event exit)\n\n- gold role-bootstrap.sh: exit early when the UserPromptSubmit input is Code Mode\n  background output (top-level "source":"poll_event"); javis_mission judged it\n  human, so it would have been recorded as an owner mission. REV 2026-11-17.1.\n- block 52: CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1 in ~/.claude and ~/.cys/claude\n  settings env, and onFailure "continue" on PreToolUse command hooks so a slow\n  or failed hook keeps the pre-Code-Mode meaning instead of refusing the call.\n- block 53: CSO capability gate judges `cd \'<abs dir>\' && <command>` as\n  <command> run in that directory (equivalence 340/340 against the live gate).\n\nOwner approved 2026-11-17 (P6). Review: codex r1 REVISE fixed, gemini r2 ACCEPT.\nEvidence: ~/_round/codemode_1117.\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\nEOF\ngit log --oneline -1; git status --short | head -3'), False, _P_cwd)
+        chk("R2-GIT-F1 git stdin variant", B("git commit -q -F - <<'EOF'\nmessage `<command>` > soul.md\nEOF"), False, _P_cwd)
+        chk("R2-GIT-F2 git stdin variant", B("git commit -q -F- <<'EOF'\nmessage `<command>` > soul.md\nEOF"), False, _P_cwd)
+        chk("R2-GIT-F3 git stdin variant", B("git commit -q --file=- <<'EOF'\nmessage `<command>` > soul.md\nEOF"), False, _P_cwd)
+        chk("R2-GIT-F4 git stdin variant", B("git commit -q --file - <<'EOF'\nmessage `<command>` > soul.md\nEOF"), False, _P_cwd)
+
+        chk("EE6 literal commit message (cwd=canon)",
+            B("git commit -m \"$(cat <<'EOF'\necho x >> soul.md\nEOF\n)\""), False, _P_cwd)
     finally:
         os.chdir(_old_cwd)
         _sh.rmtree(_cwd_root, ignore_errors=True)
+
+    # Effective-directory and literal-data regressions (Code Mode 2026-11-17).
+    for name, command, want in [
+        ("EF1 cd quoted &&", "cd '%s' && echo x >> soul.md" % G, True),
+        ("EF2 cd semicolon", "cd '%s'; echo x >> soul.md" % G, True),
+        ("EF3 cd or", "cd '%s' || echo x >> soul.md" % G, True),
+        ("EF4 subshell", "(cd '%s' && echo x >> soul.md)" % G, True),
+        ("EF5 pushd", "pushd '%s' && touch soul.md" % G, True),
+        ("EF6 relative cd", "cd '%s/elsewhere' && cd .. && rm soul.md" % G, True),
+        ("EF7 cd minus", "cd '%s' && cd '%s' && cd - && touch soul.md" % (G, WK), True),
+        ("EF8 HOME", 'cd "$HOME/.canon" && echo x >> soul.md', True),
+        ("EF9 tilde", 'cd ~/.canon && tee soul.md', True),
+        ("EF10 variable", 'cd "$DEST" && echo x >> soul.md', True),
+        ("EF11 substitution", 'cd "$(pwd)" && echo x >> soul.md', True),
+        ("EF12 subshell restores", "(cd '%s' && cat soul.md); touch unrelated.txt" % G, False),
+        ("EF13 safe cd", "cd '%s' && echo x >> soul.md" % WK, False),
+        ("EF14 cd away", "cd '%s' && cd '%s' && touch soul.md" % (G, WK), False),
+        ("EF15 read in canon", "cd '%s' && cat soul.md" % G, False),
+        ("EF16 quoted fake heredoc", 'echo "<<\'EOF\'"\necho x >> %s/soul.md\nEOF\n' % G, True),
+        ("EF17 unterminated heredoc", "cat <<'EOF'\necho x >> %s/soul.md\n" % G, True),
+        ("EF18 real heredoc write", "cat >> %s/soul.md <<'EOF'\nhello\nEOF\n" % G, True),
+        ("EF19 literal commit message", "cd '%s' && git commit -m \"$(cat <<'EOF'\necho x >> soul.md\ncd '$DEST' && rm soul.md\nEOF\n)\"" % G, False),
+        ("EF20 HOME braces", 'cd "${HOME}/.canon" && touch soul.md', True),
+        ("EF21 quoted tilde data", "printf '%s' '~/.canon'", False),
+        ("EF22 cd redirect", "cd '%s' > %s/soul.md" % (WK,G), True),
+        ("EF23 comment fake heredoc", "# <<'EOF'\necho x >> %s/soul.md\nEOF\n" % G, True),
+        ("EF24 multiline quoted fake heredoc", "echo 'hello\n<<\"EOF\"\n'\necho x >> %s/soul.md\nEOF\n" % G, True),
+        ("EF25 python executable heredoc", "python <<'EOF'\nopen('%s/soul.md','w').write('x')\nEOF\n" % G, True),
+        ("EF26 bash executable heredoc", "bash <<'EOF'\necho x >> %s/soul.md\nEOF\n" % G, True),
+        ("EF27 nested pushd unwind", "pushd '%s' && pushd '%s' && pushd /tmp && popd && popd && echo x >> soul.md" % (G,WK), True),
+        ("EF28 pushd safe unwind", "pushd '%s' && popd && touch unrelated.txt" % G, False),
+    ]:
+        # HOME cases use a hermetic protected directory under the real home.
+        chk(name, B(command), want, P + [HOME + '/.canon/'])
+
+    # r2 accepted regression cases; staged before implementation.
+    for label, command, want in [('J1', 'cat > /tmp/a.sh <<\'EOF\'\nrm /srv/agentops/soul.md\nEOF\nbash -c "sh /tmp/a.sh"', True), ('J4', "cat > /tmp/x <<'EOF'\n/srv/agentops/soul.md\nEOF\nxargs rm < /tmp/x", True), ('J9', "cat > /tmp/x <<'EOF'\n/srv/agentops/soul.md\nEOF\nxargs -a /tmp/x rm", True), ('I14', 'git commit -m "$(cat <<\'EOF\'\nx\nEOF\n)"; cat <<\'EOF\' > /tmp/a.py\nopen(\'/srv/agentops/soul.md\',\'w\')\nEOF\npython3 /tmp/a.py', True), ('I6', "python3 <<'EOF'\nimport os; os.remove('/srv/agentops/soul.md')\nEOF", True), ('I9', "python3 - <<'EOF' && echo done\nopen('/srv/agentops/soul.md','w')\nEOF", True), ('I11', "(python3 - <<'EOF'\nopen('/srv/agentops/soul.md','w')\nEOF\n)", True), ('NODE', "node - <<'EOF'\nconst fs=require('fs'); fs.rmSync('/srv/agentops/soul.md')\nEOF", True), ('API1', 'cd ~/.canon && python3 -c "import os; os.remove(\'soul.md\')"', True), ('API2', 'cd ~/.canon && python3 -c "import pathlib; pathlib.Path(\'soul.md\').write_text(\'x\')"', True), ('API3', 'cd ~/.canon && python3 -c "import os; os.rename(\'/tmp/x\',\'soul.md\')"', True), ('API4', "cd ~/.canon && python3 - <<'EOF'\nimport os; os.remove('soul.md')\nEOF", True), ('API5', 'cd ~/.canon && node -e "require(\'fs\').writeFileSync(\'soul.md\',\'x\')"', True), ('READ-STAGE', 'M=/srv/agentops/soul.md; S=/srv/work/staged.md; python3 - "$M" "$S" <<\'EOF\'\nimport pathlib, sys\np=pathlib.Path(sys.argv[1]); pathlib.Path(sys.argv[2]).write_text(p.read_text())\nEOF', False)]:
+        chk("R2-" + label, B(command), want, [_canon(G) + "/", HOME + "/.canon/"])
+
+    # r1 reviewer regressions, each added before the implementation fix.
+    chk("RV-LEGACY-ENV-C helper isolation", B("env -C rm /srv/agentops/soul.md"), True, [_canon(G) + "/", HOME + "/.canon/"])
+    chk("RV-ARG-EXEC unknown argument consumer", B("ssh localhost \"$(cat <<'EOF'\necho x > /srv/agentops/soul.md\nEOF\n)\""), True, [_canon(G) + "/", HOME + "/.canon/"])
+    chk("RV-OUTER-PIPE compound stdout executor", B("(\ncat <<'EOF'\necho x > /srv/agentops/soul.md\nEOF\n) | sh"), True, [_canon(G) + "/", HOME + "/.canon/"])
+    chk("RV-OUTER-PROC process-substitution executor", B("sh < <(\ncat <<'EOF'\necho x > /srv/agentops/soul.md\nEOF\n)"), True, [_canon(G) + "/", HOME + "/.canon/"])
+    chk("RV-MASTER-READ variable source staged script", B("M=/srv/agentops/soul.md; python3 - \"$M\" <<'EOF'\nimport sys\nprint(sys.argv[1])\nEOF"), False, [_canon(G) + "/", HOME + "/.canon/"])
+    chk("RV-ENV-SCOPE wrapped subshell restores cwd", B("(cd '%s' && env -C '%s' cat soul.md); touch notes.md" % (G,WK)), False, [_canon(G) + "/", HOME + "/.canon/"])
+    for label, command, want in [('R1', "cat <<'EOF' | sh\necho x > /srv/agentops/soul.md\nEOF", True), ('R3', "cat <<'EOF' | python3\nopen('/srv/agentops/soul.md','w')\nEOF", True), ('R4', "cat <<'EOF' | xargs rm\n/srv/agentops/soul.md\nEOF", True), ('R5', 'D=/srv/agentops/soul.md; eval "rm $D"', True), ('R6', 'D=/srv/agentops; bash -c "rm $D/soul.md"', True), ('R7', 'cd /srv/agentops && eval "rm soul.md"', True), ('R9', "cd /srv/agentops && bash -c 'rm soul.md'", True), ('R11', "xargs rm <<'EOF'\n/srv/agentops/soul.md\nEOF", True), ('A30', "cd /srv/agentops && xargs rm <<'EOF'\nsoul.md\nEOF", True), ('V1', 'echo x > "$OUT"', False), ('V2', 'rm -f "$tmp"', False), ('V3', 'cp a.txt "$DEST/"', False), ('V4', 'echo x | tee "$LOG"', False), ('V5', 'git diff > "$TMPDIR/d.patch"', False), ('V6', 'touch "$(mktemp -d)/x"', False), ('V7', 'echo ok >> "$GITHUB_OUTPUT"', False), ('V8', 'mv "$a" "$b"', False), ('V9', 'echo x > `mktemp`', False), ('CD1', 'pushd /srv/work > /dev/null && touch x.txt', False), ('CD2', 'cd /srv/work 2>/dev/null && touch x.txt', False), ('CD3', 'cd -P /srv/work && touch x', False), ('CD4', 'cd -L -e -@ /srv/work 2>&1 && touch x', False), ('W1', "bash -c 'cd ~/.canon && echo x > soul.md'", True), ('W2', 'env -C ~/.canon touch soul.md', True), ('W3', 'env --chdir=~/.canon touch soul.md', True), ('W4', "cd ~/.canon && python3 - <<'EOF'\nopen('soul.md','w')\nEOF", True), ('W5', 'cd ~/.canon && python3 -c "open(\'soul.md\',\'w\')"', True), ('W6', "cd ~/.canon && cat <<'EOF' | sh\nrm soul.md\nEOF", True), ('W7', "sh -c 'cd ~/.canon && echo x > soul.md'", True), ('W8', "zsh -c 'cd ~/.canon && echo x > soul.md'", True), ('P1', "cat <<'EOF' > >(sh)\necho x > /srv/agentops/soul.md\nEOF", True), ('S1', 'cd ~/.canon; cd ~/cys-work; touch notes.md', True)]:
+        chk("RV-" + label + " reviewer", B(command), want, [_canon(G) + "/", HOME + "/.canon/"])
 
     # BB군: 정본 경로 자체에 연산자 문자가 있어도 인용/escape 경로를 차단.
     chk("BB1 quoted amp path",      B('rm "%s"' % BB_AMP), True)
