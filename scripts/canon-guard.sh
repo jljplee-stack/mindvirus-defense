@@ -712,7 +712,7 @@ def _join_shell_tokens(tokens):
                     re.fullmatch(r"(?:\d*[<>]+[|&]?|&>)", t) else shlex.quote(str(t)) for t in tokens)
 
 
-def _copy_operands(seg):
+def _copy_operands(seg, conditional=None):
     """One option parser for both copy write locations and staged-file updates."""
     base, args = os.path.basename(seg[0]), seg[1:]
     grouped_flags = {"cp": "abdfHiklLnPpRrsTuvx", "mv": "bfinTuv", "install": "bcdDpprsTvC"}[base]
@@ -730,10 +730,14 @@ def _copy_operands(seg):
         elif arg in ("--suffix", "--mode", "--owner", "--group", "--strip-program"):
             i += 2; continue
         elif arg.startswith("--"):
-            pass
+            if (conditional is not None and base in ("cp", "mv")
+                    and (arg in ("--no-clobber", "--interactive", "--update") or arg.startswith("--update="))):
+                conditional.add(arg)
         elif arg.startswith("-") and len(arg) > 1:
             short = arg[1:]
             for index, flag in enumerate(short):
+                if conditional is not None and base in ("cp", "mv") and flag in "nui":
+                    conditional.add(flag)
                 if flag == "t":
                     value = short[index+1:] or (args[i+1] if i+1 < len(args) else None)
                     if value is not None:targets.append(value)
@@ -837,14 +841,16 @@ def _invalidate_staged(seg, tokens, dirs, staged):
     if base in ("rm", "unlink", "truncate") or (base == "tee" and not any(a in ("-a", "--append") for a in args)):
         paths.extend(positional)
     elif base in ("cp", "mv", "install"):
-        targets, operands = _copy_operands(seg)
+        conditional = set()
+        targets, operands = _copy_operands(seg, conditional)
         sources = operands if targets else operands[:-1]
         destinations = targets or operands[-1:]
-        for destination in destinations:
+        # Conditional operations may retain both files; keep their known bodies.
+        for destination in ([] if conditional else destinations):
             if not targets:paths.append(destination)
             for source in sources:
                 paths.append(destination.rstrip('/\\') + '/' + source.replace('\\','/').rstrip('/').rsplit('/',1)[-1])
-        if base == "mv":paths.extend(sources)
+        if base == "mv" and not conditional:paths.extend(sources)
     for path in paths:
         for d in dirs:
             staged.pop(_shell_path(path, d), None)
